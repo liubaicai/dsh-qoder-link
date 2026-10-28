@@ -1,0 +1,5 @@
+This project derives bridge, response parsing and scheduling code from dsh-codebuddy-link (MIT), which includes work from dsh-agy-link.
+Reference: https://github.com/liubaicai/dsh-codebuddy-link at 8bfce126b994f276da79524d53578f9afc365aeb.
+CLI integration design also references https://github.com/1373700184/dsh-subagent at b548020a6c36521d93a0d9a2ec08e6f74961e8a2 (no implementation copied).
+Qoder is a trademark of its owner. The user-specified Qoder logo is used only for plugin identification; it is not licensed under this project MIT license. This is an independent community plugin, not an official Qoder product.
+Logo source: https://img.alicdn.com/imgextra/i4/O1CN012JUQmkuk4LH0cGga_!!6000000004828-2-tps-304-304.png

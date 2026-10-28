@@ -1,0 +1,5 @@
+# dsh plugin --profile web add <absolute-path-to-package.tgz>
+- insert:
+    - id: qoder-link
+      name: 'dsh-qoder-link'
+      config: {}

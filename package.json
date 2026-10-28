@@ -1,0 +1,21 @@
+{
+  "name": "dsh-qoder-link",
+  "version": "0.1.0",
+  "description": "通过官方 Qoder CLI 调用模型，支持 qodercli 国际版与 qoderclicn 中国版，接入 DSH 对话和工具调用。",
+  "repository": {"type":"git","url":"git+https://github.com/liubaicai/dsh-qoder-link.git"},
+  "homepage": "https://github.com/liubaicai/dsh-qoder-link#readme",
+  "bugs": {"url":"https://github.com/liubaicai/dsh-qoder-link/issues"},
+  "icon": "./assets/qoder.png",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {".":{"types":"./dist/index.d.ts","default":"./dist/index.js"},"./client":"./dist/client.js","./cordis.patch.yml":"./cordis.patch.yml","./package.json":"./package.json","./locale/*.json":"./locale/*.json","./icon":"./assets/qoder.png"},
+  "files": ["dist","assets","locale","scripts/verify-package.mjs","cordis.patch.yml","README.md","LICENSE","NOTICE","CHANGELOG.md"],
+  "keywords": ["dsh-plugin","deepseek-harness","qoder","qodercli","qoderclicn"],
+  "dsh": {"bundle":{"patch":"./cordis.patch.yml"},"client":{"inject":["slots"],"platform":"web"}},
+  "engines": {"node":">=22.18.0"},
+  "scripts": {"build":"tsc -p tsconfig.build.json && node scripts/build-client.mjs","check":"tsc --noEmit","test":"npm run build && node --experimental-strip-types --test test/*.test.ts","prepack":"node scripts/verify-package.mjs","verify:package":"node scripts/verify-package.mjs"},
+  "peerDependencies": {"@deepseek-ai/cordis":"^4.0.1","@deepseek-ai/dsh-commands":">=0.1.2-rc.1","@deepseek-ai/dsh-llm":">=0.1.2-rc.1","@deepseek-ai/dsh-tools":">=0.1.2-rc.1"},
+  "devDependencies": {"@deepseek-ai/cordis":"^4.0.1","@deepseek-ai/dsh-commands":"0.1.2-rc.1","@deepseek-ai/dsh-llm":"0.1.2-rc.1","@deepseek-ai/dsh-tools":"0.1.2-rc.1","@types/node":"^22.0.0","typescript":"^5.9.2"}
+}
