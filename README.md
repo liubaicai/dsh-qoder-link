@@ -40,20 +40,20 @@ qoderclicn --list-models
 - 国际版：[获取 PAT](https://qoder.com/account/integrations)，子进程使用 `QODER_PERSONAL_ACCESS_TOKEN`。
 - 中国版：[获取 PAT](https://qoder.cn/account/integrations)，子进程使用 `QODERCN_PERSONAL_ACCESS_TOKEN`。
 
-托管账户令牌仅注入对应请求的子进程，不改写 CLI 登录文件，不修改 DSH 进程的环境变量。插件保存 PAT 不等于验证成功，实际认证由 CLI 完成。不要把令牌填进路径或模型字段，也不要提交到代码仓库。
+托管账户令牌仅注入对应请求的子进程，不改写 CLI 登录文件，不修改 DSH 进程的环境变量。子进程始终清除从宿主继承的两区域 PAT 环境变量，避免意外使用 shell 中的其他身份；未托管区域使用 CLI 自身保存的登录。插件保存 PAT 不等于验证成功，实际认证由 CLI 完成。不要把令牌填进路径或模型字段，也不要提交到代码仓库。
 
 ## 2. 安装插件
 
 需要支持第三方模型适配器与 Web 插槽的 DSH，Node.js 22.18 或更高版本。
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.1.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.0.tgz
+dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.1.tgz
 ```
 
 也可在支持本地插件包的 DSH 插件管理界面选择 `.tgz`。按 DSH 提示重载插件或重启，刷新 Web 页面。
@@ -96,6 +96,8 @@ dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.0.
 ## 配置
 
 配置优先级：Web 保存值 > Cordis 插件配置 > 环境变量 > 默认值。保存位置为 `$DSH_HOME/plugins/dsh-qoder-link/settings.json`，未指定 DSH_HOME 时为 `~/.dsh/plugins/dsh-qoder-link/settings.json`。
+
+配置文件损坏或包含无效字段时，插件保留原文件，关闭模型和委派入口，在设置页显示固定诊断并阻止覆盖保存。请修复或备份移走损坏配置后重载插件；不会因显示设置页面而悄悄恢复默认执行权限。
 
 账户凭据独立保存在同目录的 `accounts.json`，不混入普通配置，状态接口仅返回账户元数据。文件以受限权限原子写入，但不是加密保险库；Windows 部署还应限制该目录的 NTFS 访问权限。备份时按敏感凭据处理。
 

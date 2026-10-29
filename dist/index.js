@@ -38,7 +38,7 @@ export function apply(ctx, entry = {}) {
                 return { kind: 'success', text: config.models.filter(id => !config.hiddenModels.includes(id)).map(id => `- qoder/${id}`).join('\n') };
             if (command === 'status')
                 return { kind: 'success', text: [
-                        '**Qoder Link**', `Enabled: ${config.enabled}`, `CLI variant: ${config.cliVariant}`, `Executable: ${selectedBin(config)}`,
+                        '**Qoder Link**', ...(store.loadError ? [store.loadError] : []), `Enabled: ${config.enabled}`, `CLI variant: ${config.cliVariant}`, `Executable: ${selectedBin(config)}`,
                         `Default model: ${config.defaultModel}; effort: ${config.reasoningEffort}`, `Transport: ACP stdio; concurrency: ${config.maxConcurrency}; inactivity timeout: ${config.timeoutMs}ms`,
                         'Provider tools: DSH-managed; CLI built-in tools and MCP disabled.',
                         `Delegation tools: ${config.tools || 'disabled'} (${config.permissionMode})`,

@@ -15,21 +15,34 @@ export class SettingsStore {
     saved;
     entry;
     path;
+    /** Diagnostic-only recovery keeps the panel available, never execution or writes. */
+    loadError;
     constructor(entry = {}, path = settingsPath()) {
         this.entry = entry;
         this.path = path;
-        let saved = {};
+        this.saved = {};
         try {
-            saved = JSON.parse(readFileSync(path, 'utf8'));
+            let saved = {};
+            try {
+                saved = JSON.parse(readFileSync(path, 'utf8'));
+            }
+            catch (error) {
+                if (error.code !== 'ENOENT')
+                    throw error;
+            }
+            this.saved = validateKeys(saved);
+            this.config = resolveConfig({ ...entry, ...this.saved });
         }
-        catch (error) {
-            if (error.code !== 'ENOENT')
-                throw new Error('Cannot read Qoder settings; repair or remove the plugin settings file');
+        catch {
+            // Never overwrite the bad file or inherit unsafe/invalid administrator environment.
+            // External repair followed by a restart is the explicit recovery step.
+            this.loadError = 'Qoder settings could not be loaded. Provider and delegation are disabled. Repair the plugin settings.json file or administrator configuration and restart DSH; the original file has not been changed.';
+            this.config = resolveConfig({ enabled: false, askTool: false, permissionMode: 'dont_ask', tools: '' }, {});
         }
-        this.saved = validateKeys(saved);
-        this.config = resolveConfig({ ...entry, ...this.saved });
     }
     update(patch) {
+        if (this.loadError)
+            throw new Error(this.loadError);
         const updates = validateKeys(patch);
         const saved = { ...this.saved, ...updates };
         const next = resolveConfig({ ...this.entry, ...saved });

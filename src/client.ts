@@ -25,7 +25,7 @@ interface Config {
 interface Run {id: string; state: string; requestedModel: string; requestedEffort: string; queuedAt: number; warning: boolean; accountName?: string; failure?: string; lastProgressAt?: number}
 interface Account {id: string; name: string; cliVariant: Config['cliVariant']; enabled: boolean; authState: 'unverified'; createdAt: string; active: number}
 interface Accounts {managed: boolean; cliVariant: Config['cliVariant']; mode: 'fixed' | 'pool'; selectedAccountId?: string; accounts: Account[]; patSupport: 'supported' | 'unknown'}
-interface Status {config: Config; runs: Run[]; accounts?: Accounts}
+interface Status {settingsError: boolean; config: Config; runs: Run[]; accounts?: Accounts}
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const efforts = ['auto', 'low', 'medium', 'high']
 const modes = ['dont_ask', 'default', 'accept_edits']
@@ -53,7 +53,7 @@ export function parseAccounts(value: unknown): Accounts {
   return {managed: value.managed, cliVariant: value.cliVariant as Config['cliVariant'], mode: value.mode as Accounts['mode'], selectedAccountId: value.selectedAccountId as string | undefined, accounts, patSupport: value.patSupport as Accounts['patSupport']}
 }
 export function parseStatus(value: unknown): Status {
-  if (!record(value) || validateConfig(value.config) || !Array.isArray(value.runs)) throw new Error('服务端状态格式无效')
+  if (!record(value) || (value.settingsError !== undefined && typeof value.settingsError !== 'string') || validateConfig(value.config) || !Array.isArray(value.runs)) throw new Error('服务端状态格式无效')
   const runs: Run[] = []
   for (const run of value.runs) {
     if (!record(run) || typeof run.id !== 'string' || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state)) || !integer(run.queuedAt, 0)) continue
@@ -67,7 +67,7 @@ export function parseStatus(value: unknown): Status {
   const config: Config = {enabled:c.enabled, cliVariant:c.cliVariant, qodercliBin:c.qodercliBin, qoderclicnBin:c.qoderclicnBin, models:c.models, hiddenModels:c.hiddenModels, defaultModel:c.defaultModel, tools:c.tools, permissionMode:c.permissionMode, reasoningEffort:c.reasoningEffort, timeoutMs:c.timeoutMs, contextWindow:c.contextWindow, maxPromptChars:c.maxPromptChars, workspaceRoot:c.workspaceRoot, maxConcurrency:c.maxConcurrency, queueTimeoutMs:c.queueTimeoutMs, stallWarnMs:c.stallWarnMs, askTool:c.askTool, modelContext:c.modelContext}
   const accounts = value.accounts === undefined ? undefined : parseAccounts(value.accounts)
   if (accounts && accounts.cliVariant !== config.cliVariant) throw new Error('服务端账户格式无效')
-  return {config, accounts, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5)}
+  return {settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0, config, accounts, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5)}
 }
 type AccountAction = 'accounts/add' | 'accounts/update' | 'accounts/remove' | 'accounts/config'
 async function request(action: 'status' | 'config' | AccountAction, body?: unknown): Promise<Status | Accounts> {
@@ -76,7 +76,18 @@ async function request(action: 'status' | 'config' | AccountAction, body?: unkno
     response = await fetch(`/plugins/qoder-link/${action}`, {method: action === 'status' ? 'GET' : 'POST', credentials: 'same-origin', mode: 'same-origin', signal: AbortSignal.timeout(20000),
       ...(body ? {headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {})})
   } catch { throw new Error('请求失败或超时，请检查连接后重试。') }
-  if (!response.ok) throw new Error(`请求失败（HTTP ${response.status}），请检查设置后重试。`)
+  if (!response.ok) {
+    let diagnostic = ''
+    if (action === 'status') {
+      try {
+        const value: unknown = await response.json()
+        if (record(value) && value.error === 'Cannot access Qoder account store; repair the store before continuing') {
+          diagnostic = 'Qoder 账户存储无法读取，请修复账户存储后重试；不会回退本机登录。'
+        }
+      } catch { /* Unknown and non-JSON errors stay generic. */ }
+    }
+    throw new Error(diagnostic || `请求失败（HTTP ${response.status}），请检查设置后重试。`)
+  }
   try { const value: unknown = await response.json(); return action.startsWith('accounts/') ? parseAccounts(value) : parseStatus(value) } catch { throw new Error('服务端状态格式无效，请重试。') }
 }
 const border = '0.5px solid var(--dsw-alias-border-l2, var(--gray-6))'
@@ -102,7 +113,13 @@ export function loginInstructions(variant: Config['cliVariant']): string {
   return `在运行 DSH 的同一台机器、同一系统账户下打开终端，运行 ${variant} 并按 CLI 自身的提示完成登录。若配置了自定义路径，请运行对应的可执行文件。本地登录状态不在此页面验证，也不会导入 CLI 已有凭据。托管 PAT 账户请在上方单独添加。`
 }
 function SettingsPanel(): unknown {
-  const [status, setStatus] = useState<Status | null>(null)
+  const [status, storeStatus] = useState<Status | null>(null)
+  const settingsError = useRef(false)
+  const setStatus = (result: Status) => {
+    // Synchronous guard also protects handlers captured before the next render.
+    settingsError.current = result.settingsError
+    storeStatus(result)
+  }
   const [draft, setDraft] = useState<Config | null>(null)
   const [busy, setBusy] = useState<'load' | 'save' | 'account' | ''>('load')
   const [editor, setEditor] = useState<{kind: 'add' | 'replace' | 'rename'; id?: string; cliVariant: Config['cliVariant']} | null>(null)
@@ -119,12 +136,12 @@ function SettingsPanel(): unknown {
   const live = useRef(false)
   const pending = useRef(false)
   const load = async (save = false) => {
-    if (!live.current || pending.current || (save && (!draft || validateConfig(draft)))) return
+    if (!live.current || pending.current || (save && (settingsError.current || !draft || validateConfig(draft)))) return
     pending.current = true; const ticket = ++sequence.current
     setBusy(save ? 'save' : 'load'); setError(''); setMessage('')
     try {
       if (polling.current) await polling.current
-      if (!live.current || ticket !== sequence.current) return
+      if (!live.current || ticket !== sequence.current || (save && settingsError.current)) return
       const result = await request(save ? 'config' : 'status', save && draft ? draft : undefined) as Status
       if (!live.current || ticket !== sequence.current) return
       setStatus(result)
@@ -146,7 +163,7 @@ function SettingsPanel(): unknown {
       if (!live.current || ticket !== sequence.current) return
       const accounts = await request(action, body) as Accounts
       if (!live.current || ticket !== sequence.current) return
-      setStatus(previous => previous && previous.config.cliVariant === accounts.cliVariant ? {...previous, accounts} : previous)
+      storeStatus(previous => previous && previous.config.cliVariant === accounts.cliVariant ? {...previous, accounts} : previous)
       closeEditor(); setRemoving(null); setMessage('账户已更新。PAT 未经过远端验证。')
     } catch (cause) {if (live.current && ticket === sequence.current) setError(cause instanceof Error ? cause.message : '账户操作失败，请重试。')}
     finally {if (ticket === sequence.current) {pending.current = false; if (live.current) setBusy('')}}
@@ -195,6 +212,7 @@ function SettingsPanel(): unknown {
     h('div', {style: {...row, justifyContent: 'space-between', marginBottom: '12px'}}, h('h2', {style: {margin: 0}}, 'Qoder'),
       h('span', {style: {fontSize: '12px', color: secondary}}, `原生 ACP / stdio${status ? status.config.enabled ? '，已启用' : '，未启用' : ''}`)),
     h('p', null, '通过本机 Qoder CLI 接入 DSH。国际版与中国版隔离账户和路径，共用模型与运行设置。'),
+    status?.settingsError ? h('p', {role: 'alert'}, 'Qoder 配置无法加载，模型调用与独立委派已停用。请修复插件 settings.json 或管理员配置后重启 DSH；原文件未修改，无法保存覆盖。') : null,
     error ? h('p', {role: 'alert'}, error) : null,
     busy ? h('p', {role: 'status', 'aria-live': 'polite'}, busy === 'save' ? '正在保存设置…' : busy === 'account' ? '正在更新账户…' : '正在加载状态…') : null,
     message ? h('p', {role: 'status'}, message) : null,
@@ -261,7 +279,7 @@ function SettingsPanel(): unknown {
         h('label', {style: field}, '每模型上下文预算（JSON）', h('textarea', {value: contextText, onChange: (event: {target: {value: string}}) => {setContextText(event.target.value); setMessage(''); try {update({modelContext: JSON.parse(event.target.value)})} catch { /* keep text for validation */ }}})),
         h('p', null, '上下文预算仅用于 DSH 元数据，不会覆盖 CLI 上下文限制。')),
       validation ? h('p', {role: 'alert'}, validation) : null,
-      h('button', {type: 'button', disabled: !!busy || !!validation, onClick: () => void load(true)}, '保存设置')) : null,
+      h('button', {type: 'button', disabled: !!busy || !!status?.settingsError || !!validation, onClick: () => void load(true)}, '保存设置')) : null,
     h('details', {style: box, 'aria-label': '运行记录'}, h('summary', {style: {cursor: 'pointer', fontWeight: 600}}, `运行记录（${status?.runs.length ?? 0}）`), h('p', {style: {fontSize: '12px'}}, '当前进程内最近 5 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。'),
       ...(status?.runs.length ? status.runs.map(run => h('article', {key: run.id, style: {borderTop: border, padding: '8px 0', overflowWrap: 'anywhere'}},
         h('p', null, `${({queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消'} as Record<string, string>)[run.state]}；模型：${run.requestedModel}；推理强度请求：${run.requestedEffort}（未确认）`),

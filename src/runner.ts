@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { access, readFile, realpath } from 'node:fs/promises';
+import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { runQoderAcp } from './acp.ts';
@@ -38,6 +38,7 @@ export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Pr
       try { await access(path, process.platform === 'win32' || ['.js', '.mjs', '.cjs'].includes(extname(path)) ? constants.F_OK : constants.X_OK); }
       catch { continue; }
       const resolved = await realpath(path);
+      if (!(await stat(resolved)).isFile()) throw new Error('Unsupported Qoder launcher; provide the actual CLI JavaScript file');
       const ext = extname(resolved).toLowerCase();
       if (['.js', '.mjs', '.cjs'].includes(ext)) return { command: process.execPath, args: [resolved] };
       if (['.cmd', '.bat', '.ps1'].includes(ext) || (process.platform === 'win32' && !ext)) {
@@ -45,8 +46,13 @@ export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Pr
         // Only an npm-style basedir-relative node_modules path is accepted.
         const match = source.match(/(?:%~?dp0%?|%dp0%|\$basedir)[\\/]([^"'\r\n]*?node_modules[\\/][^"'\r\n]+)/i);
         if (match) {
-          const target = resolve(dirname(resolved), match[1]!.replace(/[\\/]/g, '/'));
+          const target = await realpath(resolve(dirname(resolved), match[1]!.replace(/[\\/]/g, '/')));
           await access(target, constants.R_OK);
+          // A recognized shim must point to a Node entry, not a shell or directory.
+          if (!(await stat(target)).isFile() || (!['.js', '.mjs', '.cjs'].includes(extname(target).toLowerCase())
+            && (extname(target) || !/^#![^\r\n]*\bnode\b/.test(await readFile(target, 'utf8'))))) {
+            throw new Error('Unsupported Qoder launcher; provide the actual CLI JavaScript file');
+          }
           return { command: process.execPath, args: [target] };
         }
         if (!ext && /^#![^\r\n]*\bnode\b/.test(source)) return { command: process.execPath, args: [resolved] };
@@ -68,9 +74,10 @@ export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Pr
  */
 export function childEnv(authToken?: string, cliVariant: 'qodercli' | 'qoderclicn' = 'qodercli'): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  // Never inherit shell identity, even without a managed account: the CLI may
+  // use its own disk login instead. Windows environment names ignore casing.
+  for (const key of Object.keys(env)) if (['QODER_PERSONAL_ACCESS_TOKEN', 'QODERCN_PERSONAL_ACCESS_TOKEN'].includes(key.toUpperCase())) delete env[key];
   if (authToken !== undefined) {
-    // Managed identity must never inherit another account or region's PAT.
-    for (const key of Object.keys(env)) if (['QODER_PERSONAL_ACCESS_TOKEN', 'QODERCN_PERSONAL_ACCESS_TOKEN'].includes(key.toUpperCase())) delete env[key];
     env[cliVariant === 'qoderclicn' ? 'QODERCN_PERSONAL_ACCESS_TOKEN' : 'QODER_PERSONAL_ACCESS_TOKEN'] = authToken;
   }
   return env;

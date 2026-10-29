@@ -6,6 +6,8 @@ export declare class SettingsStore {
     private saved;
     private readonly entry;
     readonly path: string;
+    /** Diagnostic-only recovery keeps the panel available, never execution or writes. */
+    readonly loadError?: string;
     constructor(entry?: Record<string, unknown>, path?: string);
     update(patch: unknown): PluginConfig;
 }

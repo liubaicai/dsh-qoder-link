@@ -63,6 +63,19 @@ test('result text alone signals authentication with a login hint', () => {
   assert.throws(() => new QoderProtocol().accept({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: [], result: '401 Unauthorized' }), /authentication required.*qodercli login/);
   assert.throws(() => new QoderProtocol().accept({ type: 'result', is_error: true, errors: [], result: 'boom' }), /^Error: Qoder request failed$/);
 });
+test('numeric assistant answers are not mistaken for HTTP failures', () => {
+  for (const answer of ['400', '401', '404', '429', '500', '599', ' 404\n']) {
+    for (const streamed of [false, true]) {
+      const protocol = new QoderProtocol();
+      if (streamed) {
+        protocol.accept({ type: 'stream_event', event: { type: 'message_start', message: { id: 'numeric' } } });
+        assert.deepEqual(protocol.accept({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: answer } } }), [{ type: 'text', delta: answer }]);
+      }
+      assert.deepEqual(protocol.accept({ type: 'assistant', message: { id: 'numeric', content: [{ type: 'text', text: answer }] } }), streamed ? [] : [{ type: 'text', delta: answer }]);
+      assert.deepEqual(protocol.accept({ type: 'result', result: answer }), [{ type: 'result', text: answer }]);
+    }
+  }
+});
 test('assistant message echoing a bare HTTP status fails fast instead of hanging', () => {
   // Compatibility regression for an echoed error with no terminal result.
   const auth = { type: 'assistant', message: { id: 'a1', content: [{ type: 'text', text: '401 Unauthorized' }] } };

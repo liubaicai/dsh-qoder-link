@@ -50,7 +50,7 @@ function parseAccounts(value) {
     return { managed: value.managed, cliVariant: value.cliVariant, mode: value.mode, selectedAccountId: value.selectedAccountId, accounts, patSupport: value.patSupport };
 }
 function parseStatus(value) {
-    if (!record(value) || validateConfig(value.config) || !Array.isArray(value.runs))
+    if (!record(value) || (value.settingsError !== undefined && typeof value.settingsError !== 'string') || validateConfig(value.config) || !Array.isArray(value.runs))
         throw new Error('服务端状态格式无效');
     const runs = [];
     for (const run of value.runs) {
@@ -67,7 +67,7 @@ function parseStatus(value) {
     const accounts = value.accounts === undefined ? undefined : parseAccounts(value.accounts);
     if (accounts && accounts.cliVariant !== config.cliVariant)
         throw new Error('服务端账户格式无效');
-    return { config, accounts, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5) };
+    return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0, config, accounts, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5) };
 }
 async function request(action, body) {
     let response;
@@ -78,8 +78,19 @@ async function request(action, body) {
     catch {
         throw new Error('请求失败或超时，请检查连接后重试。');
     }
-    if (!response.ok)
-        throw new Error(`请求失败（HTTP ${response.status}），请检查设置后重试。`);
+    if (!response.ok) {
+        let diagnostic = '';
+        if (action === 'status') {
+            try {
+                const value = await response.json();
+                if (record(value) && value.error === 'Cannot access Qoder account store; repair the store before continuing') {
+                    diagnostic = 'Qoder 账户存储无法读取，请修复账户存储后重试；不会回退本机登录。';
+                }
+            }
+            catch { /* Unknown and non-JSON errors stay generic. */ }
+        }
+        throw new Error(diagnostic || `请求失败（HTTP ${response.status}），请检查设置后重试。`);
+    }
     try {
         const value = await response.json();
         return action.startsWith('accounts/') ? parseAccounts(value) : parseStatus(value);
@@ -111,7 +122,13 @@ function loginInstructions(variant) {
     return `在运行 DSH 的同一台机器、同一系统账户下打开终端，运行 ${variant} 并按 CLI 自身的提示完成登录。若配置了自定义路径，请运行对应的可执行文件。本地登录状态不在此页面验证，也不会导入 CLI 已有凭据。托管 PAT 账户请在上方单独添加。`;
 }
 function SettingsPanel() {
-    const [status, setStatus] = useState(null);
+    const [status, storeStatus] = useState(null);
+    const settingsError = useRef(false);
+    const setStatus = (result) => {
+        // Synchronous guard also protects handlers captured before the next render.
+        settingsError.current = result.settingsError;
+        storeStatus(result);
+    };
     const [draft, setDraft] = useState(null);
     const [busy, setBusy] = useState('load');
     const [editor, setEditor] = useState(null);
@@ -128,7 +145,7 @@ function SettingsPanel() {
     const live = useRef(false);
     const pending = useRef(false);
     const load = async (save = false) => {
-        if (!live.current || pending.current || (save && (!draft || validateConfig(draft))))
+        if (!live.current || pending.current || (save && (settingsError.current || !draft || validateConfig(draft))))
             return;
         pending.current = true;
         const ticket = ++sequence.current;
@@ -138,7 +155,7 @@ function SettingsPanel() {
         try {
             if (polling.current)
                 await polling.current;
-            if (!live.current || ticket !== sequence.current)
+            if (!live.current || ticket !== sequence.current || (save && settingsError.current))
                 return;
             const result = await request(save ? 'config' : 'status', save && draft ? draft : undefined);
             if (!live.current || ticket !== sequence.current)
@@ -186,7 +203,7 @@ function SettingsPanel() {
             const accounts = await request(action, body);
             if (!live.current || ticket !== sequence.current)
                 return;
-            setStatus(previous => previous && previous.config.cliVariant === accounts.cliVariant ? { ...previous, accounts } : previous);
+            storeStatus(previous => previous && previous.config.cliVariant === accounts.cliVariant ? { ...previous, accounts } : previous);
             closeEditor();
             setRemoving(null);
             setMessage('账户已更新。PAT 未经过远端验证。');
@@ -272,12 +289,12 @@ function SettingsPanel() {
         setRemoving(null);
         setError('');
     }
-    return h('section', { style: { fontSize: '13px', lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, var(--gray-12))', maxWidth: '800px', width: '100%', boxSizing: 'border-box', padding: '16px' }, 'aria-label': 'Qoder 设置', 'aria-busy': !!busy }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '12px' } }, h('h2', { style: { margin: 0 } }, 'Qoder'), h('span', { style: { fontSize: '12px', color: secondary } }, `原生 ACP / stdio${status ? status.config.enabled ? '，已启用' : '，未启用' : ''}`)), h('p', null, '通过本机 Qoder CLI 接入 DSH。国际版与中国版隔离账户和路径，共用模型与运行设置。'), error ? h('p', { role: 'alert' }, error) : null, busy ? h('p', { role: 'status', 'aria-live': 'polite' }, busy === 'save' ? '正在保存设置…' : busy === 'account' ? '正在更新账户…' : '正在加载状态…') : null, message ? h('p', { role: 'status' }, message) : null, !status && error ? h('button', { type: 'button', disabled: locked, onClick: () => void load() }, '重试加载') : null, h('section', { style: box, 'aria-label': '账户列表' }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', { style: { margin: 0 } }, '账户'), h('div', { style: row }, h('button', { type: 'button', disabled: locked || !status, onClick: () => void load() }, '刷新状态'), h('button', { type: 'button', disabled: accountLocked, onClick: () => openEditor('add') }, '添加账户'))), h('p', { style: { fontSize: '12px' } }, `当前账户区域：${currentVariant === 'qodercli' ? '国际版' : '中国版'}。两个区域的 PAT 不互通，切换版本不会迁移账户或回退到另一区域。`), draft && draft.cliVariant !== currentVariant ? h('p', { role: 'status' }, 'CLI 版本尚未保存，账户操作仍作用于当前已保存的区域。') : null, accounts?.patSupport === 'unknown' ? h('p', { role: 'alert' }, '当前版本的 PAT 支持尚未确认，托管账户不能执行。') : null, h('div', { role: 'group', 'aria-label': '账户使用方式', style: { ...row, marginBottom: '10px' } }, h('button', { type: 'button', 'aria-pressed': accounts?.mode === 'fixed', disabled: accountLocked || !eligible, style: accounts?.mode === 'fixed' ? selectedStyle : {},
+    return h('section', { style: { fontSize: '13px', lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, var(--gray-12))', maxWidth: '800px', width: '100%', boxSizing: 'border-box', padding: '16px' }, 'aria-label': 'Qoder 设置', 'aria-busy': !!busy }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '12px' } }, h('h2', { style: { margin: 0 } }, 'Qoder'), h('span', { style: { fontSize: '12px', color: secondary } }, `原生 ACP / stdio${status ? status.config.enabled ? '，已启用' : '，未启用' : ''}`)), h('p', null, '通过本机 Qoder CLI 接入 DSH。国际版与中国版隔离账户和路径，共用模型与运行设置。'), status?.settingsError ? h('p', { role: 'alert' }, 'Qoder 配置无法加载，模型调用与独立委派已停用。请修复插件 settings.json 或管理员配置后重启 DSH；原文件未修改，无法保存覆盖。') : null, error ? h('p', { role: 'alert' }, error) : null, busy ? h('p', { role: 'status', 'aria-live': 'polite' }, busy === 'save' ? '正在保存设置…' : busy === 'account' ? '正在更新账户…' : '正在加载状态…') : null, message ? h('p', { role: 'status' }, message) : null, !status && error ? h('button', { type: 'button', disabled: locked, onClick: () => void load() }, '重试加载') : null, h('section', { style: box, 'aria-label': '账户列表' }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', { style: { margin: 0 } }, '账户'), h('div', { style: row }, h('button', { type: 'button', disabled: locked || !status, onClick: () => void load() }, '刷新状态'), h('button', { type: 'button', disabled: accountLocked, onClick: () => openEditor('add') }, '添加账户'))), h('p', { style: { fontSize: '12px' } }, `当前账户区域：${currentVariant === 'qodercli' ? '国际版' : '中国版'}。两个区域的 PAT 不互通，切换版本不会迁移账户或回退到另一区域。`), draft && draft.cliVariant !== currentVariant ? h('p', { role: 'status' }, 'CLI 版本尚未保存，账户操作仍作用于当前已保存的区域。') : null, accounts?.patSupport === 'unknown' ? h('p', { role: 'alert' }, '当前版本的 PAT 支持尚未确认，托管账户不能执行。') : null, h('div', { role: 'group', 'aria-label': '账户使用方式', style: { ...row, marginBottom: '10px' } }, h('button', { type: 'button', 'aria-pressed': accounts?.mode === 'fixed', disabled: accountLocked || !eligible, style: accounts?.mode === 'fixed' ? selectedStyle : {},
         onClick: () => void manage('accounts/config', { cliVariant: currentVariant, mode: 'fixed', accountId: accounts?.accounts.find(item => item.id === accounts.selectedAccountId && item.enabled)?.id ?? eligible?.id }) }, '固定账户'), h('button', { type: 'button', 'aria-pressed': accounts?.mode === 'pool', disabled: accountLocked, style: accounts?.mode === 'pool' ? selectedStyle : {},
         onClick: () => void manage('accounts/config', { cliVariant: currentVariant, mode: 'pool' }) }, '账户池')), ...(accounts?.accounts ?? []).map(account => h('article', { key: account.id, 'aria-label': `账户 ${account.name}`, style: { borderTop: border, padding: '10px 0' } }, h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: row }, h('strong', { style: { overflowWrap: 'anywhere' } }, account.name), h('span', { style: { fontSize: '12px', color: secondary } }, account.enabled ? '已启用，PAT 未验证' : '已停用'), accounts.mode === 'fixed' && accounts.selectedAccountId === account.id ? h('span', { style: { fontSize: '12px', color: accent } }, '当前') : null, account.active ? h('span', { style: { fontSize: '12px', color: secondary } }, `运行中 ${account.active}`) : null), h('div', { style: row }, h('button', { type: 'button', disabled: accountLocked || !account.enabled || (accounts.mode === 'fixed' && accounts.selectedAccountId === account.id), onClick: () => void manage('accounts/config', { cliVariant: currentVariant, mode: 'fixed', accountId: account.id }) }, '使用'), h('button', { type: 'button', disabled: accountLocked, onClick: () => openEditor('rename', account) }, '重命名'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void manage('accounts/update', { id: account.id, enabled: !account.enabled }) }, account.enabled ? '停用' : '启用'), h('button', { type: 'button', disabled: accountLocked, onClick: () => openEditor('replace', account) }, '替换 PAT'), h('button', { type: 'button', disabled: accountLocked, onClick: () => { closeEditor(); setRemoving(account.id); } }, '删除'))), removing === account.id ? h('div', { role: 'group', 'aria-label': '确认删除账户', style: { ...row, marginTop: '8px' } }, h('span', null, '删除此账户及其已保存的 PAT？'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void manage('accounts/remove', { id: account.id }) }, '确认删除'), h('button', { type: 'button', disabled: accountLocked, onClick: () => setRemoving(null) }, '保留账户')) : null)), !accounts?.accounts.length ? h('p', null, accounts?.managed ? '暂无托管账户，不会回退到 CLI 本地登录。请添加账户。' : accounts ? '暂无托管账户，当前沿用 CLI 本地登录。' : '账户管理尚不可用，请刷新状态或升级服务端。') : null, h('p', { style: { fontSize: '12px' } }, '固定账户仅使用所选账户；账户池在当前区域的已启用账户间调度。保存 PAT 不代表认证成功，不查询积分或模型目录。'), editor && editor.cliVariant === currentVariant ? h('div', { key: `${currentVariant}-${editor.kind}-${editor.id ?? ''}`, role: 'group', 'aria-label': editor.kind === 'add' ? '添加 PAT 账户' : editor.kind === 'replace' ? '替换账户 PAT' : '重命名账户', style: { borderTop: border, paddingTop: '12px' } }, editor.kind !== 'replace' ? h('label', { style: field }, '账户名称', h('input', { value: accountName, maxLength: 100, disabled: accountLocked, autoComplete: 'off', onChange: (event) => setAccountName(event.target.value) })) : null, editor.kind !== 'rename' ? h('label', { style: field }, '个人访问令牌（PAT）', h('input', { type: 'password', ref: password, disabled: accountLocked, autoComplete: 'new-password', spellCheck: false, autoCapitalize: 'none', 'aria-label': '个人访问令牌（PAT）' })) : null, editor.kind !== 'rename' ? h('p', { style: { fontSize: '12px' } }, '仅发送至当前 DSH 服务端保存，不回显已有 PAT，不写入浏览器存储。提交后立即清空输入。', h('a', { href: currentVariant === 'qodercli' ? 'https://qoder.com/account/integrations' : 'https://qoder.cn/account/integrations', target: '_blank', rel: 'noopener noreferrer', style: { color: accent, marginLeft: '8px' } }, '获取 PAT')) : null, h('div', { style: row }, h('button', { type: 'button', disabled: accountLocked || (editor.kind !== 'replace' && !accountName.trim()), onClick: submitAccount }, editor.kind === 'rename' ? '保存名称' : '保存 PAT'), h('button', { type: 'button', disabled: accountLocked, onClick: closeEditor }, '取消'))) : null), draft ? h('fieldset', { disabled: !!busy, style: { border: 0, padding: 0, margin: '16px 0', minWidth: 0 } }, h('section', { style: box }, h('h3', null, 'CLI 与登录'), h('label', { style: field }, h('span', null, h('input', { type: 'checkbox', checked: draft.enabled, onChange: (event) => update({ enabled: event.target.checked }) }), '启用 Qoder Link')), select('cliVariant', '使用的 CLI 版本', ['qodercli', 'qoderclicn']), h('div', { style: grid }, textField('qodercliBin', 'qodercli 可执行文件路径', '留空使用 PATH 中的 qodercli'), textField('qoderclicnBin', 'qoderclicn 可执行文件路径', '留空使用 PATH 中的 qoderclicn')), h('p', null, loginInstructions(draft.cliVariant)), h('p', null, '切换版本不会迁移登录，也不会回退到另一个 CLI。路径仅填写可执行文件，不要附加命令参数。')), h('section', { style: box }, h('h3', null, '模型与运行'), h('label', { style: field }, '共享模型列表（每行一个 ID）', h('textarea', { value: modelText, onChange: (event) => { setModelText(event.target.value); update({ models: split(event.target.value) }); } })), h('div', { style: grid }, select('defaultModel', '默认模型', draft.models.filter(id => !draft.hiddenModels.includes(id))), select('reasoningEffort', '推理强度', efforts)), h('p', null, 'auto 不发送推理强度参数。其他值只是请求，不代表服务端已确认支持。模型 ID 的可用性由当前 CLI 与服务端决定。'), h('p', { style: { fontSize: '12px' } }, '无进展超时不是总时长上限。有效文本、思考、工具状态变化和匹配的 ACP 初始化响应会续期；无进展提醒仅提示，不会中止调用。'), h('div', { style: grid }, ...[['timeoutMs', '无进展超时（毫秒）', 1, 2147483647], ['maxConcurrency', '最大并发数', 1, 16], ['queueTimeoutMs', '排队超时（毫秒）', 1, 2147483647], ['stallWarnMs', '无进展提醒（毫秒，0 关闭）', 0, 2147483647]].map(([key, label, min, max]) => h('label', { key, style: field }, label, h('input', { type: 'number', min, max, step: 1, value: Number.isNaN(draft[key]) ? '' : draft[key], onChange: (event) => update({ [key]: event.target.value.trim() ? Number(event.target.value) : NaN }) }))))), h('section', { style: box }, h('h3', null, '工具与安全边界'), h('p', { role: 'note' }, '模型提供方调用始终禁用 CLI 内置工具。独立 ask 工具默认不启用 CLI 内置工具；只有显式填写 tools 才会启用，启用后在 DSH 文件沙箱之外执行，可访问 CLI 系统账户有权访问的资源。'), h('label', { style: field }, h('span', null, h('input', { type: 'checkbox', checked: draft.askTool, onChange: (event) => update({ askTool: event.target.checked }) }), '注册独立 ask 工具')), textField('tools', '独立 ask 调用允许的 CLI 工具', '默认留空，不启用 CLI 内置工具'), select('permissionMode', '独立 ask 调用权限模式', modes), h('p', null, '权限模式不是 DSH 沙箱。default 模式可能需要交互确认；无人值守调用请谨慎配置。')), h('details', { style: box }, h('summary', { style: { cursor: 'pointer' } }, '高级设置'), textField('workspaceRoot', 'CLI 工作目录（绝对路径，可留空）'), h('label', { style: field }, '隐藏的共享模型（每行一个 ID）', h('textarea', { value: hiddenText, onChange: (event) => { setHiddenText(event.target.value); update({ hiddenModels: split(event.target.value) }); } })), ...[['contextWindow', 'DSH 回退上下文预算'], ['maxPromptChars', '最大提示词字符数']].map(([key, label]) => h('label', { key, style: field }, label, h('input', { type: 'number', min: 1, step: 1, value: Number.isNaN(draft[key]) ? '' : draft[key], onChange: (event) => update({ [key]: event.target.value.trim() ? Number(event.target.value) : NaN }) }))), h('label', { style: field }, '每模型上下文预算（JSON）', h('textarea', { value: contextText, onChange: (event) => { setContextText(event.target.value); setMessage(''); try {
             update({ modelContext: JSON.parse(event.target.value) });
         }
-        catch { /* keep text for validation */ } } })), h('p', null, '上下文预算仅用于 DSH 元数据，不会覆盖 CLI 上下文限制。')), validation ? h('p', { role: 'alert' }, validation) : null, h('button', { type: 'button', disabled: !!busy || !!validation, onClick: () => void load(true) }, '保存设置')) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内最近 5 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。'), ...(status?.runs.length ? status.runs.map(run => h('article', { key: run.id, style: { borderTop: border, padding: '8px 0', overflowWrap: 'anywhere' } }, h('p', null, `${{ queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消' }[run.state]}；模型：${run.requestedModel}；推理强度请求：${run.requestedEffort}（未确认）`), run.accountName ? h('p', null, `账户：${run.accountName}`) : null, run.lastProgressAt !== undefined ? h('p', null, `最近进展：${new Date(run.lastProgressAt).toLocaleTimeString()}`) : null, run.failure ? h('p', null, { timeout: '无进展超时', 'queue-timeout': '排队超时', aborted: '已中止', error: '执行失败' }[run.failure]) : null, run.warning ? h('p', { role: 'status' }, '长时间无进展，仍在等待；这不代表失败。') : null)) : [h('p', { key: 'empty' }, '暂无运行记录')])));
+        catch { /* keep text for validation */ } } })), h('p', null, '上下文预算仅用于 DSH 元数据，不会覆盖 CLI 上下文限制。')), validation ? h('p', { role: 'alert' }, validation) : null, h('button', { type: 'button', disabled: !!busy || !!status?.settingsError || !!validation, onClick: () => void load(true) }, '保存设置')) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内最近 5 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。'), ...(status?.runs.length ? status.runs.map(run => h('article', { key: run.id, style: { borderTop: border, padding: '8px 0', overflowWrap: 'anywhere' } }, h('p', null, `${{ queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消' }[run.state]}；模型：${run.requestedModel}；推理强度请求：${run.requestedEffort}（未确认）`), run.accountName ? h('p', null, `账户：${run.accountName}`) : null, run.lastProgressAt !== undefined ? h('p', null, `最近进展：${new Date(run.lastProgressAt).toLocaleTimeString()}`) : null, run.failure ? h('p', null, { timeout: '无进展超时', 'queue-timeout': '排队超时', aborted: '已中止', error: '执行失败' }[run.failure]) : null, run.warning ? h('p', { role: 'status' }, '长时间无进展，仍在等待；这不代表失败。') : null)) : [h('p', { key: 'empty' }, '暂无运行记录')])));
 }
 function apply(ctx) {
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'qoder-link', order: 20, label: 'Qoder Link' }, SettingsPanel));

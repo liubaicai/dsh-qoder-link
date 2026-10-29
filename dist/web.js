@@ -6,7 +6,7 @@ const modelId = (value) => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9.
 export function registerSettingsRoutes(server, store, notify, readRuns = () => [], accounts) {
     let disposed = false;
     const disposers = [];
-    const snapshot = () => ({ config: Object.fromEntries(configKeys.map(key => [key, store.config[key]])), runs: publicRuns(readRuns()), ...(accounts ? { accounts: accounts.snapshot() } : {}) });
+    const snapshot = () => ({ ...(store.loadError ? { settingsError: store.loadError } : {}), config: Object.fromEntries(configKeys.map(key => [key, store.config[key]])), runs: publicRuns(readRuns()), ...(accounts ? { accounts: accounts.snapshot() } : {}) });
     if (accounts) {
         for (const action of ['', '/add', '/update', '/remove', '/config']) {
             const dispose = server.register({ kind: 'exact', path: `/plugins/qoder-link/accounts${action}`, handler: (req, res) => {
@@ -121,9 +121,12 @@ export function registerSettingsRoutes(server, store, notify, readRuns = () => [
                         }
                         send(200, snapshot());
                     }
-                    catch {
+                    catch (error) {
+                        // Only this exact plugin-authored account diagnostic is safe on /status.
                         // Never echo parser, filesystem, runner or submitted-value diagnostics.
-                        send(action === 'config' ? 400 : 500, { error: action === 'config' ? '设置保存失败，请检查字段类型、取值范围和配置目录权限。' : '状态读取失败，请重试。' });
+                        const accountStoreError = 'Cannot access Qoder account store; repair the store before continuing';
+                        send(action === 'config' ? 400 : 500, { error: action === 'status' && error instanceof Error && error.message === accountStoreError
+                                ? accountStoreError : action === 'config' ? '设置保存失败，请检查字段类型、取值范围和配置目录权限。' : '状态读取失败，请重试。' });
                     }
                 })();
             } });
@@ -181,8 +184,15 @@ function publicRuns(values) {
         }
         if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure)))
             clean.failure = run.failure;
-        result.push(clean);
+        // Keep only five candidates; insert after ties for stable input ordering.
+        const position = result.findIndex(entry => Number(entry.queuedAt) < Number(run.queuedAt));
+        if (position >= 0)
+            result.splice(position, 0, clean);
+        else if (result.length < 5)
+            result.push(clean);
+        if (result.length > 5)
+            result.pop();
     }
-    return result.sort((a, b) => Number(b.queuedAt) - Number(a.queuedAt)).slice(0, 5);
+    return result;
 }
 //# sourceMappingURL=web.js.map

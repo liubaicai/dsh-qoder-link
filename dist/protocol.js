@@ -150,14 +150,15 @@ export class QoderProtocol {
     }
     /**
      * Compatibility safeguard inherited from the reference bridge: some CLI
-     * failures echo a bare HTTP status instead of producing a result. Fail fast
+     * failures echo an HTTP status with a reason phrase instead of a result.
+     * Numeric answers alone are ordinary output. Fail fast only on status lines
      * and omit the supplied status text, which could contain credential material.
      */
     rejectEchoedHttpError(blocks) {
         if (blocks.length !== 1 || blocks[0].type !== 'text')
             return;
         const message = text(blocks[0].text).trim();
-        if (message.length > 80 || !/^[45]\d{2}( [A-Za-z .,'/-]+)?$/.test(message))
+        if (message.length > 80 || !/^[45]\d{2} [A-Za-z][A-Za-z .,'/-]*$/.test(message))
             return;
         throw new Error(/401|unauth/i.test(message)
             ? 'Qoder request failed (authentication required): 在终端运行 qodercli login 后重试'

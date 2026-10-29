@@ -27,8 +27,44 @@ test('settings persist both paths atomically, preserve live identity, and reject
     const raw=readFileSync(path,'utf8'); assert.equal(new SettingsStore({},path).config.qodercliBin,'qoder')
     assert.throws(() => store.update({cliVariant:'bad'})); assert.throws(() => store.update({token:'secret'}))
     assert.equal(readFileSync(path,'utf8'),raw); assert.equal(store.config.cliVariant,'qoderclicn')
-    writeFileSync(path,'invalid'); assert.throws(() => new SettingsStore({},path), /Cannot read/)
+    writeFileSync(path,'invalid'); const recovery=new SettingsStore({},path)
+    assert.equal(recovery.config.enabled,false); assert.equal(recovery.config.askTool,false)
+    assert.ok(recovery.loadError); assert.throws(()=>recovery.update({enabled:true}), /could not be loaded/)
+    assert.equal(readFileSync(path,'utf8'),'invalid')
   } finally {rmSync(root,{recursive:true,force:true})}
+})
+
+test('invalid persisted, administrator and environment settings fail closed without rewriting', () => {
+  const root=mkdtempSync(join(tmpdir(),'qoder-recovery-')), path=join(root,'settings.json')
+  const previous=process.env.DSH_QODER_MODEL_CONTEXT
+  try {
+    for (const raw of ['{"token":"SECRET"}', '[]', 'null', '{"permissionMode":"unsafe"}', '{"hiddenModels":["default"]}', '{"maxConcurrency":0}']) {
+      writeFileSync(path,raw)
+      const store=new SettingsStore({enabled:true,askTool:true,tools:'default'},path)
+      assert.equal(store.config.enabled,false); assert.equal(store.config.askTool,false)
+      assert.equal(store.config.tools,''); assert.equal(store.config.permissionMode,'dont_ask')
+      assert.doesNotMatch(store.loadError!, /SECRET|unsafe/)
+      assert.throws(()=>store.update({}), /could not be loaded/)
+      assert.equal(readFileSync(path,'utf8'),raw)
+    }
+    writeFileSync(path,'{}')
+    const badEntry=new SettingsStore({cliVariant:'bad'},path)
+    assert.ok(badEntry.loadError); assert.equal(badEntry.config.enabled,false)
+    process.env.DSH_QODER_MODEL_CONTEXT='SECRET invalid JSON'
+    const badEnv=new SettingsStore({},path)
+    assert.ok(badEnv.loadError); assert.equal(badEnv.config.askTool,false)
+    assert.deepEqual(badEnv.config.modelContext,{})
+    assert.throws(()=>badEnv.update({enabled:true}))
+    if(previous===undefined)delete process.env.DSH_QODER_MODEL_CONTEXT;else process.env.DSH_QODER_MODEL_CONTEXT=previous
+    // Repair does not unlock the old instance; a new store is required.
+    assert.throws(()=>badEnv.update({enabled:true}))
+    assert.equal(new SettingsStore({},path).loadError,undefined)
+    const unreadable=new SettingsStore({},root)
+    assert.ok(unreadable.loadError); assert.equal(unreadable.config.enabled,false)
+  } finally {
+    if(previous===undefined)delete process.env.DSH_QODER_MODEL_CONTEXT;else process.env.DSH_QODER_MODEL_CONTEXT=previous
+    rmSync(root,{recursive:true,force:true})
+  }
 })
 
 test('provider follows live region changes but never enables CLI tools', async () => {

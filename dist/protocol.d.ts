@@ -56,7 +56,8 @@ export declare class QoderProtocol {
     accept(value: unknown): BridgeEvent[];
     /**
      * Compatibility safeguard inherited from the reference bridge: some CLI
-     * failures echo a bare HTTP status instead of producing a result. Fail fast
+     * failures echo an HTTP status with a reason phrase instead of a result.
+     * Numeric answers alone are ordinary output. Fail fast only on status lines
      * and omit the supplied status text, which could contain credential material.
      */
     private rejectEchoedHttpError;

@@ -62,6 +62,7 @@ interface Accounts {
     patSupport: 'supported' | 'unknown';
 }
 interface Status {
+    settingsError: boolean;
     config: Config;
     runs: Run[];
     accounts?: Accounts;

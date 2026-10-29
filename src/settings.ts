@@ -17,15 +17,26 @@ export class SettingsStore {
   private saved: Record<string, unknown>
   private readonly entry: Record<string, unknown>
   readonly path: string
+  /** Diagnostic-only recovery keeps the panel available, never execution or writes. */
+  readonly loadError?: string
   constructor(entry: Record<string, unknown> = {}, path = settingsPath()) {
     this.entry = entry; this.path = path
-    let saved: unknown = {}
-    try { saved = JSON.parse(readFileSync(path, 'utf8')) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Cannot read Qoder settings; repair or remove the plugin settings file') }
-    this.saved = validateKeys(saved)
-    this.config = resolveConfig({...entry, ...this.saved})
+    this.saved = {}
+    try {
+      let saved: unknown = {}
+      try { saved = JSON.parse(readFileSync(path, 'utf8')) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      this.saved = validateKeys(saved)
+      this.config = resolveConfig({...entry, ...this.saved})
+    } catch {
+      // Never overwrite the bad file or inherit unsafe/invalid administrator environment.
+      // External repair followed by a restart is the explicit recovery step.
+      this.loadError = 'Qoder settings could not be loaded. Provider and delegation are disabled. Repair the plugin settings.json file or administrator configuration and restart DSH; the original file has not been changed.'
+      this.config = resolveConfig({enabled:false, askTool:false, permissionMode:'dont_ask', tools:''}, {})
+    }
   }
   update(patch: unknown): PluginConfig {
+    if (this.loadError) throw new Error(this.loadError)
     const updates = validateKeys(patch)
     const saved = {...this.saved, ...updates}
     const next = resolveConfig({...this.entry, ...saved})

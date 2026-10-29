@@ -125,8 +125,8 @@ export async function* runQoderAcp(request: QoderRequest): AsyncGenerator<Bridge
     if (typeof params.sessionId !== 'string' || !params.sessionId || params.sessionId.length > 512 || !object(params.update)) throw protocolError();
     const row = params.update;
     if (typeof row.sessionUpdate !== 'string') throw protocolError();
-    // Qoder emits initial config metadata BEFORE answering session/new.
-    // Admit only that non-executing setup notification and bind its ID later.
+    // Initial non-executing metadata may precede the session/new response.
+    // Validate the allowlist and bind its ID later; metadata is not progress.
     if (!sessionId) {
       if (![...pending.values()].some(entry => entry.method === 'session/new') || !isSessionMetadata(row)) throw protocolError();
       if (setupSessionId && setupSessionId !== params.sessionId) throw protocolError();
@@ -273,7 +273,7 @@ export async function* runQoderAcp(request: QoderRequest): AsyncGenerator<Bridge
   if (request.signal?.aborted) onAbort();
   const driver = (async () => {
     try {
-      const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.0' } });
+      const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.1' } });
       if (!object(init) || init.protocolVersion !== 1 || !object(init.agentCapabilities)) throw protocolError();
       if (failure) throw failure;
       const session = await rpc('session/new', { cwd: request.cwd, mcpServers: [] });

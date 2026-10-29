@@ -91,7 +91,23 @@ test('cancel reaps descendants even if root exits during grace', async t => {
   controller.abort();
   assert.equal((await outcome).name, 'AbortError');
   assert.ok(pid > 0);
-  assert.throws(() => process.kill(pid, 0));
+  // POSIX signals are asynchronous; an orphan may briefly remain visible or
+  // remain as a non-running zombie until PID 1 reaps it in a CI container.
+  let stopped = false;
+  for (let i = 0; i < 100; i++) {
+    try {
+      process.kill(pid, 0);
+      if (process.platform === 'linux') {
+        const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+        if (/^\s*[ZX]\s/.test(stat.slice(stat.lastIndexOf(')') + 1))) { stopped = true; break; }
+      }
+    } catch (error) {
+      if (['ESRCH', 'ENOENT'].includes((error as NodeJS.ErrnoException).code ?? '')) { stopped = true; break; }
+      throw error;
+    }
+    await delay(20);
+  }
+  assert.equal(stopped, true, 'descendant must not remain running after cancellation');
   assert.equal(await readFile(join(f.cwd, 'cancelled'), 'utf8'), 'yes');
 });
 test('consumer early return kills the process tree', async t => {
@@ -123,6 +139,47 @@ test('Windows npm shim resolves to JavaScript without shell execution', async t 
   // Windows runners can expose TEMP through an 8.3 alias; resolver canonicalizes it.
   assert.equal(resolved.args[0], await realpath(target));
 });
+test('npm shims reject non-Node targets and directories', async t => {
+  const f = await fixture(t);
+  const moduleDir = join(f.cwd, 'node_modules', 'fake');
+  await mkdir(moduleDir, { recursive: true });
+  const shim = join(f.cwd, 'qoder.cmd');
+  for (const name of ['cli.cmd', 'cli.txt', 'directory']) {
+    const target = join(moduleDir, name);
+    if (name === 'directory') await mkdir(target); else await writeFile(target, 'echo not a Node entry');
+    await writeFile(shim, `@ECHO off\r\n"%dp0%\\node_modules\\fake\\${name}" %*\r\n`);
+    if (process.platform !== 'win32') { const { chmod } = await import('node:fs/promises'); await chmod(shim, 0o755); }
+    await assert.rejects(resolveQoderBin(shim, f.cwd), /Unsupported Qoder launcher/);
+  }
+  await assert.rejects(resolveQoderBin(moduleDir, f.cwd), /Unsupported Qoder launcher/);
+  const target = join(moduleDir, 'cli');
+  await writeFile(target, '#!/usr/bin/env node\n');
+  await writeFile(shim, '@ECHO off\r\n"%dp0%\\node_modules\\fake\\cli" %*\r\n');
+  assert.deepEqual(await resolveQoderBin(shim, f.cwd), { command: process.execPath, args: [await realpath(target)] });
+});
+
+test('childEnv always removes both regional PAT casing variants without changing the host', () => {
+  const original = process.env;
+  // A plain object also exercises simultaneous casing variants on Windows.
+  const keys = ['QODER_PERSONAL_ACCESS_TOKEN', 'qoder_personal_access_token', 'Qoder_Personal_Access_Token', 'QODERCN_PERSONAL_ACCESS_TOKEN', 'qodercn_personal_access_token', 'Qodercn_Personal_Access_Token'];
+  const host = { ...original, HOME: '/disk-login-home', USERPROFILE: 'C:\\disk-login-home', ...Object.fromEntries(keys.map(key => [key, 'host-secret'])) };
+  process.env = host;
+  try {
+    for (const cliVariant of ['qodercli', 'qoderclicn'] as const) {
+      for (const authToken of [undefined, 'selected-account-token']) {
+        const env = childEnv(authToken, cliVariant);
+        const expectedKey = cliVariant === 'qoderclicn' ? 'QODERCN_PERSONAL_ACCESS_TOKEN' : 'QODER_PERSONAL_ACCESS_TOKEN';
+        assert.deepEqual(Object.keys(env).filter(key => keys.some(pat => pat.toUpperCase() === key.toUpperCase())), authToken ? [expectedKey] : []);
+        if (authToken) assert.equal(env[expectedKey], authToken);
+        assert.equal(env.HOME, host.HOME);
+        assert.equal(env.USERPROFILE, host.USERPROFILE);
+        assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
+      }
+    }
+    for (const key of keys) assert.equal(process.env[key], 'host-secret');
+  } finally { process.env = original; }
+});
+
 test('explicit tools and permission choices are passed unchanged', async t => {
   const f = await fixture(t);
   for (const permissionMode of ['default', 'accept_edits'] as const) {

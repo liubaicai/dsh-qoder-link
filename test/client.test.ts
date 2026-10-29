@@ -207,6 +207,42 @@ test('failed PAT submission clears password and never displays raw transport dat
   assert.match(text(tree), /请求失败或超时/); cleanup?.()
 })
 
+test('settings recovery shows fixed help, rejects malformed flags and blocks stale save handlers', async () => {
+  const client=loadClient()
+  assert.equal(client.exports.parseStatus({config:client.config,runs:[]}).settingsError,false)
+  assert.equal(client.exports.parseStatus({config:client.config,runs:[],settingsError:''}).settingsError,false)
+  for(const settingsError of [true,{},42,null]) assert.throws(()=>client.exports.parseStatus({config:client.config,runs:[],settingsError}))
+  client.render();const cleanup=client.effects[0]!();await flush()
+  const staleSave=button(client.render(),'保存设置').props.onClick
+  client.respondWith(async()=>reply({config:{...client.config,enabled:false,askTool:false},runs:[],settingsError:'SECRET parser detail'}))
+  client.timers[0]!();await flush()
+  // Invoke the pre-recovery handler before React commits the new status.
+  const count=client.requests.length;staleSave();await flush();assert.equal(client.requests.length,count)
+  const tree=client.render()
+  assert.match(text(tree),/配置无法加载/);assert.match(text(tree),/原文件未修改/)
+  assert.doesNotMatch(text(tree),/SECRET parser detail/)
+  assert.equal(button(tree,'保存设置').props.disabled,true)
+  button(tree,'保存设置').props.onClick();await flush();assert.equal(client.requests.length,count)
+  cleanup?.()
+})
+
+test('status accepts only exact account-store repair diagnostic and never raw error text', async () => {
+  for(const error of ['Cannot access Qoder account store; repair the store before continuing','SECRET raw error','Cannot access Qoder account store; repair the store before continuing SECRET']) {
+    const client=loadClient()
+    client.respondWith(async()=>({ok:false,status:500,json:async()=>({error})}))
+    client.render();const cleanup=client.effects[0]!();await flush()
+    const rendered=text(client.render());assert.doesNotMatch(rendered,/SECRET/)
+    if(error==='Cannot access Qoder account store; repair the store before continuing') assert.match(rendered,/修复账户存储.*不会回退本机登录/)
+    else assert.match(rendered,/HTTP 500/)
+    cleanup?.()
+  }
+  const client=loadClient();client.render();const cleanup=client.effects[0]!();await flush()
+  client.respondWith(async()=>({ok:false,status:400,json:async()=>({error:'Cannot access Qoder account store; repair the store before continuing'})}))
+  button(client.render(),'保存设置').props.onClick();await flush()
+  assert.match(text(client.render()),/HTTP 400/);assert.doesNotMatch(text(client.render()),/不会回退本机登录/)
+  cleanup?.()
+})
+
 test('failed loading shows safe retry state and successful retry recovers', async () => {
   const client = loadClient()
   client.failRequest(); client.render(); const cleanup = client.effects[0]!()

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { apply } from '../src/index.ts'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -41,6 +41,15 @@ test('plugin wires ACP account routes, live adapter and inactivity-aware delegat
     }
     apply(context as unknown as Context, {enabled: false})
     assert.equal(providers.length, 2, 'disabled adapter remains registered so settings can enable it live')
+    const directory = join(home, 'plugins', 'dsh-qoder-link')
+    mkdirSync(directory, {recursive: true})
+    const path = join(directory, 'settings.json')
+    writeFileSync(path, 'SECRET-invalid-json')
+    apply(context as unknown as Context, {enabled: true, askTool: true})
+    const recovery = commands[2]!.handler({rawInput: 'status'})
+    assert.match(recovery.text, /Enabled: false/)
+    assert.doesNotMatch(recovery.text, /SECRET/)
+    assert.equal(readFileSync(path, 'utf8'), 'SECRET-invalid-json')
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome

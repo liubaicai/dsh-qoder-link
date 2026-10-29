@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SettingsStore } from '../src/settings.ts'
@@ -73,6 +73,51 @@ test('metadata snapshots redact run internals and retain newest five', async () 
     assert.equal(body.runs[0].contextOverrideSent, false)
     assert.equal(body.runs[0].reasoningConfirmed, false)
   }, [...runs, {id: 'bad', source: 'model', state: 'secret-state', queuedAt: 999}])
+})
+
+test('public runs retain stable top five ties from large unsorted inputs without sorting', async () => {
+  const runs=Array.from({length:1000},(_,i)=>({id:`run-${i}`,source:'model',state:'completed',queuedAt:i%7}))
+  await fixture(async ({base})=>{
+    const body=await (await fetch(base+'/plugins/qoder-link/status')).json()
+    assert.deepEqual(body.runs.map((run:{id:string})=>run.id),['run-6','run-13','run-20','run-27','run-34'])
+  },runs)
+  const source=readFileSync(new URL('../src/web.ts',import.meta.url),'utf8')
+  assert.doesNotMatch(source.slice(source.indexOf('function publicRuns')), /\.sort\(/)
+})
+
+test('recovery status is safe, writes remain blocked, account errors use only fixed diagnostics', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'qoder-recovery-web-')),routes=new Map<string,Handler>()
+  const path=join(dir,'settings.json'), accountPath=join(dir,'accounts.json')
+  writeFileSync(path,'{"SECRET": invalid')
+  const settings=new SettingsStore({},path)
+  const accounts=new AccountService(new AccountStore(accountPath),settings.config)
+  let notifications=0
+  const dispose=registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}},settings,()=>{notifications++},()=>[],accounts)
+  const server=createServer((req,res)=>routes.get(req.url!)!(req,res))
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const address=server.address();assert.ok(address && typeof address==='object')
+  const base=`http://127.0.0.1:${address.port}/plugins/qoder-link`
+  try {
+    const response=await fetch(base+'/status');assert.equal(response.status,200)
+    const body=await response.json();assert.equal(body.settingsError,settings.loadError)
+    assert.equal(body.config.enabled,false);assert.equal(body.config.askTool,false)
+    assert.doesNotMatch(JSON.stringify(body),/SECRET/)
+    assert.equal((await fetch(base+'/config',post({enabled:true,askTool:true}))).status,400)
+    assert.equal(notifications,0);assert.equal(readFileSync(path,'utf8'),'{"SECRET": invalid')
+    writeFileSync(accountPath,'SECRET invalid account JSON')
+    const broken=await fetch(base+'/status');assert.equal(broken.status,500)
+    assert.deepEqual(await broken.json(),{error:'Cannot access Qoder account store; repair the store before continuing'})
+    accounts.snapshot=()=>{throw new Error('SECRET raw filesystem error C:\\private')}
+    assert.deepEqual(await (await fetch(base+'/status')).json(),{error:'状态读取失败，请重试。'})
+    assert.equal(readFileSync(accountPath,'utf8'),'SECRET invalid account JSON')
+  } finally {dispose();await new Promise<void>(resolve=>{server.close(()=>resolve());server.closeAllConnections()});rmSync(dir,{recursive:true,force:true})}
+})
+
+test('all existing advanced panel fields remain editable', async () => {
+  await fixture(async ({base,store})=>{
+    const patch={...store.config,enabled:false,askTool:false,cliVariant:'qoderclicn',qodercliBin:'global-cli',qoderclicnBin:'china-cli',workspaceRoot:tmpdir(),timeoutMs:1234,contextWindow:9000,maxPromptChars:5000,maxConcurrency:3,queueTimeoutMs:2345,stallWarnMs:0,tools:'Read',permissionMode:'accept_edits',reasoningEffort:'high',modelContext:{default:8000}}
+    assert.equal((await fetch(base+'/plugins/qoder-link/config',post(patch))).status,200)
+    assert.deepEqual(store.config,patch)
+  })
 })
 
 test('account routes enforce origin and JSON, reject cross-region writes, never disclose PAT',async()=>{
