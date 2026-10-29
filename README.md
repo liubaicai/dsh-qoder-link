@@ -44,7 +44,25 @@ qoderclicn --list-models
 
 ## 2. 安装插件
 
-需要支持第三方模型适配器与 Web 插槽的 DSH，Node.js 22.18 或更高版本。
+需要支持第三方模型适配器与 Web 插槽的 DSH，Node.js 22.18 或更高版本。插件不会自动安装 Qoder CLI，请先按上节安装。
+
+### 从 GitHub 安装
+
+推荐直接使用 Release 安装包地址，固定到已发布版本：
+
+```sh
+dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.1/dsh-qoder-link-0.1.1.tgz"
+```
+
+也可以从 GitHub 仓库的指定标签安装：
+
+```sh
+dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.1"
+```
+
+`web` 是 DSH 配置名称；如果使用其他 profile，请替换成对应名称。安装后按提示重载插件或重启 DSH，刷新网页，在 **设置 → Qoder Link** 中选择国际版或中国版，并配置 CLI 登录或 PAT 账户。
+
+### 从本地安装包安装
 
 ```sh
 dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.1.tgz
