@@ -86,7 +86,7 @@ export class QoderAdapter extends LlmAdapter {
         try {
             // DSH executes validated tool envelopes; the CLI cannot execute local tools.
             for await (const event of this.runtime.run({
-                prompt, systemPrompt: options.system, cwd, bin: selectedBin(cfg),
+                prompt, systemPrompt: options.system, cwd, bin: selectedBin(cfg), cliVariant: cfg.cliVariant,
                 model: (options.model || cfg.defaultModel) === 'default' ? undefined : (options.model || cfg.defaultModel),
                 effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort), permissionMode: 'dont_ask', tools: '',
                 timeoutMs: cfg.timeoutMs, signal: options.signal,

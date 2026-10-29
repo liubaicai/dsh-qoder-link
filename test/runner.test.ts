@@ -11,18 +11,19 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   const cwd = await mkdtemp(join(tmpdir(), 'qodercli bridge '));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const bin = join(cwd, 'fake cli.mjs');
-  await copyFile(fileURLToPath(new URL('./fixtures/fake-cli.mjs', import.meta.url)), bin);
+  await copyFile(fileURLToPath(new URL('./fixtures/fake-acp.mjs', import.meta.url)), bin);
   return { cwd, bin };
 }
 async function collect(iterator: AsyncIterable<BridgeEvent>): Promise<BridgeEvent[]> {
   const result: BridgeEvent[] = []; for await (const event of iterator) result.push(event); return result;
 }
 
-test('runner streams Unicode and unterminated result from a temporary CLI', async t => {
+test('runner streams Unicode over native ACP from a temporary CLI', async t => {
   const f = await fixture(t);
   const events = await collect(runQoder({ ...f, prompt: '中文😀', timeoutMs: 5000 }));
-  assert.deepEqual(events[0], { type: 'text', delta: '中文😀' });
-  assert.deepEqual(events.at(-1), { type: 'result', sessionId: 'test-session', text: '中文😀', structuredOutput: { ok: true } });
+  assert.deepEqual(events[0], { type: 'reasoning', delta: 'thinking' });
+  assert.deepEqual(events[1], { type: 'text', delta: '中文😀' });
+  assert.deepEqual(events.at(-1), { type: 'result', sessionId: 'test-session', text: '中文😀' });
 });
 test('argv stays literal, disables tools, isolates MCP/settings and never resumes', async t => {
   const f = await fixture(t);
@@ -38,7 +39,8 @@ test('argv stays literal, disables tools, isolates MCP/settings and never resume
   assert.equal(args[args.indexOf('--permission-mode') + 1], 'dont_ask');
   assert.equal(args[args.indexOf('--mcp-config') + 1], '{"mcpServers":{}}');
   assert.equal(args[args.indexOf('--setting-sources') + 1], '');
-  assert.ok(args.includes('--strict-mcp-config') && args.includes('--no-session-persistence'));
+  assert.ok(args.includes('--strict-mcp-config') && args.includes('--acp'));
+  assert.ok(!args.includes('--print') && !args.includes('--acp-transport') && !args.includes('--no-session-persistence'));
   for (const flag of ['--verbose', '--include-partial-messages', '--effort', '--json-schema']) assert.ok(!args.includes(flag));
   assert.ok(!args.includes('--resume') && !args.includes('--continue'));
 });
@@ -76,6 +78,21 @@ test('abort kills spawned descendant process', async t => {
     await delay(20);
   }
   assert.equal(alive, false, 'descendant must not survive cancellation');
+});
+test('cancel reaps descendants even if root exits during grace', async t => {
+  const f = await fixture(t);
+  const pidFile = join(f.cwd, 'orphan.pid');
+  const controller = new AbortController();
+  const outcome = collect(runQoder({ ...f, prompt: `exit-tree:${pidFile}`, signal: controller.signal })).catch(error => error);
+  let pid = 0;
+  for (let i = 0; i < 100; i++) {
+    try { pid = Number(await readFile(pidFile, 'utf8')); break; } catch { await delay(30); }
+  }
+  controller.abort();
+  assert.equal((await outcome).name, 'AbortError');
+  assert.ok(pid > 0);
+  assert.throws(() => process.kill(pid, 0));
+  assert.equal(await readFile(join(f.cwd, 'cancelled'), 'utf8'), 'yes');
 });
 test('consumer early return kills the process tree', async t => {
   const f = await fixture(t);

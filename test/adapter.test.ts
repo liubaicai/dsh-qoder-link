@@ -58,6 +58,7 @@ test('plain stream maps reasoning, text and disjoint usage before finish', async
   const runner: Runner = async function* (request) {
     assert.equal(request.tools, ''); assert.equal(request.permissionMode, 'dont_ask')
     assert.equal(request.model, undefined)
+    assert.equal(request.cliVariant, 'qodercli')
     yield {type:'reasoning', delta:'think'}; yield {type:'text',delta:'hello'}
     yield {type:'usage', input:10,output:5,cacheRead:3,cacheWrite:2}
     yield {type:'result',text:'hello',sessionId:'s'}

@@ -40,12 +40,34 @@ interface Run {
     requestedEffort: string;
     queuedAt: number;
     warning: boolean;
+    accountName?: string;
+    failure?: string;
+    lastProgressAt?: number;
+}
+interface Account {
+    id: string;
+    name: string;
+    cliVariant: Config['cliVariant'];
+    enabled: boolean;
+    authState: 'unverified';
+    createdAt: string;
+    active: number;
+}
+interface Accounts {
+    managed: boolean;
+    cliVariant: Config['cliVariant'];
+    mode: 'fixed' | 'pool';
+    selectedAccountId?: string;
+    accounts: Account[];
+    patSupport: 'supported' | 'unknown';
 }
 interface Status {
     config: Config;
     runs: Run[];
+    accounts?: Accounts;
 }
 export declare function validateConfig(value: unknown): string;
+export declare function parseAccounts(value: unknown): Accounts;
 export declare function parseStatus(value: unknown): Status;
 export declare function loginInstructions(variant: Config['cliVariant']): string;
 export declare function apply(ctx: ClientContext): void;

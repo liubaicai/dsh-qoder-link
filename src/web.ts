@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { SettingsStore } from './settings.ts'
+import type { AccountService } from './account-service.ts'
+import { object } from './accounts.ts'
 
 export interface WebServerLike {
   register(route: {kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void}): unknown
@@ -10,10 +12,41 @@ const modelId = (value: unknown): value is string => typeof value === 'string' &
 
 /** Host authentication remains authoritative; additionally reject browser cross-origin requests. */
 export function registerSettingsRoutes(server: WebServerLike, store: SettingsStore, notify: () => void,
-  readRuns: () => unknown[] = () => []): () => void {
+  readRuns: () => unknown[] = () => [], accounts?: AccountService): () => void {
   let disposed = false
   const disposers: (() => void)[] = []
-  const snapshot = () => ({config: Object.fromEntries(configKeys.map(key => [key, store.config[key]])), runs: publicRuns(readRuns())})
+  const snapshot = () => ({config: Object.fromEntries(configKeys.map(key => [key, store.config[key]])), runs: publicRuns(readRuns()), ...(accounts ? {accounts:accounts.snapshot()} : {})})
+  if (accounts) {
+    for (const action of ['', '/add', '/update', '/remove', '/config']) {
+      const dispose = server.register({kind:'exact',path:`/plugins/qoder-link/accounts${action}`,handler:(req,res)=>{void (async()=>{
+        const send=(code:number,body:unknown)=>{res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(body))}
+        if(disposed){send(503,{error:'插件已停用'});return}
+        const method=action ? 'POST':'GET'
+        if(req.method!==method){res.setHeader('Allow',method);send(405,{error:`${method} only`});return}
+        if(req.headers['sec-fetch-site']==='cross-site' || (req.headers.origin && !sameHost(req.headers.origin,req.headers.host))){send(403,{error:'Cross-origin request denied'});return}
+        try {
+          if(action){
+            if(!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type']||'')){send(415,{error:'JSON required'});return}
+            const body=await readJson(req)
+            if(disposed){send(503,{error:'插件已停用'});return}
+            if(action==='/add') {
+              const value=object(body,['cliVariant','name','token']);if(value.cliVariant!==store.config.cliVariant)throw new Error();accounts.add(value)
+            }else if(action==='/config') {
+              const value=object(body,['cliVariant','mode','accountId']);if(value.cliVariant!==store.config.cliVariant)throw new Error();accounts.configure(value)
+            }else {
+              const value=object(body,action==='/update'?['id','name','enabled','token']:['id'])
+              if(typeof value.id!=='string')throw new Error()
+              const {id,...patch}=value
+              if(action==='/update')accounts.update(id,patch);else accounts.remove(id)
+            }
+            try{notify()}catch{/* host listener failures must not disclose diagnostics */}
+          }
+          send(200,accounts.snapshot())
+        }catch{send(action?400:500,{error:action?'账户保存失败，请检查输入和凭据目录权限。':'账户读取失败，请修复账户存储。'})}
+      })()}})
+      if(typeof dispose==='function')disposers.push(dispose as ()=>void)
+    }
+  }
   for (const action of ['status', 'config'] as const) {
     const dispose = server.register({kind: 'exact', path: `/plugins/qoder-link/${action}`, handler: (req, res) => {
       void (async () => {

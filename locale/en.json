@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Qoder Link",
-    "description": "Connect DSH models and tools through the official Qoder CLI, with separate qodercli and qoderclicn settings."
+    "description": "Connect DSH models and tools through native ACP and the official Qoder CLI, with isolated international and China PAT accounts, fixed-account selection, and account pools."
   }
 }

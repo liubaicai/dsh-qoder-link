@@ -1,0 +1,496 @@
+import { spawn } from 'node:child_process';
+import { isSessionMetadata } from "./acp-messages.js";
+import { captureAcpDescendants } from "./acp-cleanup.js";
+import { isModelIdentifier } from "./metadata.js";
+import { NdjsonDecoder } from "./protocol.js";
+import { childEnv, killTree, resolveQoderBin } from "./runner.js";
+const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const validId = (value) => typeof value === 'string' || (typeof value === 'number' && Number.isSafeInteger(value));
+const protocolError = () => new Error('Invalid Qoder ACP protocol message (content omitted)');
+const abortError = () => Object.assign(new Error('Qoder ACP request aborted'), { name: 'AbortError' });
+const DEFAULT_TIMEOUT = 10 * 60 * 1000;
+const CANCEL_GRACE_MS = 200;
+const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+/**
+ * Native tools remain entirely inside Qoder. ACP notifications are display
+ * events, never tool requests to execute or replay in the host. Each invocation
+ * creates a fresh process/session; request.prompt contains the complete history.
+ */
+export async function* runQoderAcp(request) {
+    if (request.signal?.aborted)
+        throw abortError();
+    if (typeof request.prompt !== 'string' || typeof request.cwd !== 'string' || !request.cwd)
+        throw new TypeError('prompt and cwd are required');
+    // ACP tasks may run indefinitely while making progress. This is an idle
+    // budget, not a wall-clock deadline.
+    const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)
+        throw new RangeError('timeoutMs must be a positive finite timer duration');
+    if (request.permissionMode && !['dont_ask', 'default', 'accept_edits'].includes(request.permissionMode))
+        throw new TypeError('Unsupported permissionMode');
+    if (request.model !== undefined && !isModelIdentifier(request.model))
+        throw new TypeError('Invalid Qoder request model id');
+    if (request.cliVariant !== undefined && !['qodercli', 'qoderclicn'].includes(request.cliVariant))
+        throw new TypeError('Unsupported cliVariant');
+    if (request.authToken !== undefined && (typeof request.authToken !== 'string' || !request.authToken.trim() || /[\r\n\0]/.test(request.authToken)))
+        throw new TypeError('Invalid Qoder authToken');
+    const executable = await resolveQoderBin(request.bin ?? request.cliVariant, request.cwd);
+    if (request.signal?.aborted)
+        throw abortError();
+    const args = [...executable.args, '--acp', '--tools', request.tools ?? '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '', '--permission-mode', request.permissionMode ?? 'dont_ask'];
+    for (const [flag, value] of [['--system-prompt', request.systemPrompt], ['--model', request.model], ['--reasoning-effort', request.effort]]) {
+        if (value !== undefined)
+            args.push(flag, value);
+    }
+    const child = spawn(executable.command, args, { cwd: request.cwd, env: childEnv(request.authToken, request.cliVariant), shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+    const decoder = new NdjsonDecoder(MAX_FRAME_BYTES);
+    const pending = new Map();
+    const queue = [];
+    const tools = new Map();
+    let queueBytes = 0;
+    let outputBytes = 0;
+    let output = '';
+    let setupSessionId;
+    let nextId = 0;
+    let sessionId;
+    let failure;
+    let finished = false;
+    let promptResponded = false;
+    let closed = false;
+    let resolveClosed;
+    const didClose = new Promise(resolve => { resolveClosed = resolve; });
+    let stopping = false;
+    let wake;
+    let termination;
+    let cleanupFailure;
+    const notify = () => { const resolve = wake; wake = undefined; resolve?.(); };
+    const progress = () => {
+        if (!stopping && !failure && !promptResponded)
+            timer.refresh();
+    };
+    const rejectPending = (error) => {
+        for (const entry of pending.values())
+            entry.reject(error);
+        pending.clear();
+    };
+    const send = (message) => {
+        if (closed || child.stdin.destroyed || !child.stdin.writable)
+            throw new Error('Qoder ACP connection closed');
+        const frame = JSON.stringify(message) + '\n';
+        const bytes = Buffer.byteLength(frame);
+        if (bytes > MAX_FRAME_BYTES || child.stdin.writableLength + bytes > MAX_BUFFER_BYTES)
+            throw new Error('Qoder ACP request exceeds buffer limit');
+        child.stdin.write(frame);
+    };
+    const terminate = (cancel) => termination ??= (async () => {
+        stopping = true;
+        clearTimeout(timer);
+        let cleanup;
+        // Snapshot identities BEFORE the agent can exit in response to cancel.
+        // If capture fails, still force cleanup below, but do not claim success.
+        if (child.pid) {
+            try {
+                cleanup = await captureAcpDescendants(child.pid);
+            }
+            catch {
+                cleanupFailure = new Error('Qoder ACP descendant capture failed; cleanup could not be verified');
+            }
+        }
+        if (cancel && sessionId && !closed) {
+            try {
+                send({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId } });
+            }
+            catch { /* Broken pipe: kill below. */ }
+            // Keep draining during this short grace period, but never execute requests.
+            await new Promise(resolve => setTimeout(resolve, CANCEL_GRACE_MS));
+        }
+        try {
+            await killTree(child);
+        }
+        catch {
+            cleanupFailure = new Error('Qoder ACP process cleanup failed');
+        }
+        try {
+            await cleanup?.();
+        }
+        catch {
+            cleanupFailure = new Error('Qoder ACP descendant cleanup failed; native work may still be running');
+        }
+        // killTree on POSIX signals synchronously; wait for stdio/process closure
+        // before publishing a result, but do not let a broken child block forever.
+        if (!closed)
+            await new Promise(resolve => {
+                const timer = setTimeout(resolve, 1000);
+                void didClose.then(() => { clearTimeout(timer); resolve(); });
+            });
+        if (!closed)
+            cleanupFailure = new Error('Qoder ACP process did not close after cleanup');
+    })();
+    const fail = (error) => {
+        if (failure)
+            return;
+        failure = error;
+        rejectPending(error);
+        notify();
+        void terminate(true);
+    };
+    const push = (event) => {
+        const bytes = Buffer.byteLength(JSON.stringify(event));
+        if (queueBytes + bytes > MAX_BUFFER_BYTES)
+            throw new Error('Qoder ACP event buffer exceeds limit');
+        queue.push({ event, bytes });
+        queueBytes += bytes;
+        notify();
+    };
+    const rpc = (method, params) => new Promise((resolve, reject) => {
+        if (failure || stopping) {
+            reject(failure ?? new Error('Qoder ACP connection closed'));
+            return;
+        }
+        const id = ++nextId;
+        pending.set(id, { method, resolve, reject });
+        try {
+            send({ jsonrpc: '2.0', id, method, params });
+        }
+        catch {
+            pending.delete(id);
+            reject(new Error('Unable to send Qoder ACP request'));
+        }
+    });
+    const update = (params) => {
+        if (typeof params.sessionId !== 'string' || !params.sessionId || params.sessionId.length > 512 || !object(params.update))
+            throw protocolError();
+        const row = params.update;
+        if (typeof row.sessionUpdate !== 'string')
+            throw protocolError();
+        // Qoder emits initial config metadata BEFORE answering session/new.
+        // Admit only that non-executing setup notification and bind its ID later.
+        if (!sessionId) {
+            if (![...pending.values()].some(entry => entry.method === 'session/new') || !isSessionMetadata(row))
+                throw protocolError();
+            if (setupSessionId && setupSessionId !== params.sessionId)
+                throw protocolError();
+            setupSessionId = params.sessionId;
+            return;
+        }
+        if (params.sessionId !== sessionId)
+            throw protocolError();
+        if (promptResponded && !isSessionMetadata(row))
+            throw protocolError();
+        if (row.sessionUpdate === 'agent_message_chunk' || row.sessionUpdate === 'agent_thought_chunk') {
+            if (!object(row.content) || typeof row.content.type !== 'string')
+                throw protocolError();
+            if (row.content.type !== 'text')
+                return;
+            if (typeof row.content.text !== 'string')
+                throw protocolError();
+            const delta = row.content.text;
+            if (!delta)
+                return;
+            const type = row.sessionUpdate === 'agent_message_chunk' ? 'text' : 'reasoning';
+            if (type === 'text') {
+                // Message IDs identify chunks, not finality. Without a verified semantic
+                // final-answer marker, every text part (including ID-less prefixes) stays.
+                // Preserve the exact stream; never interpret/replay JSON or tool-looking text.
+                outputBytes += Buffer.byteLength(delta);
+                if (outputBytes > MAX_BUFFER_BYTES)
+                    throw new Error('Qoder ACP response exceeds limit');
+                output += delta;
+            }
+            push({ type, delta });
+            progress();
+        }
+        else if (row.sessionUpdate === 'tool_call' || row.sessionUpdate === 'tool_call_update') {
+            if (!(request.tools ?? '')) {
+                fail(new Error('Qoder ACP violated native-tool isolation; tools are disabled'));
+                return;
+            }
+            if (typeof row.toolCallId !== 'string' || !row.toolCallId)
+                throw protocolError();
+            if (row.title !== undefined && typeof row.title !== 'string')
+                throw protocolError();
+            if (row.kind !== undefined && typeof row.kind !== 'string')
+                throw protocolError();
+            if (row.status !== undefined && (typeof row.status !== 'string' || !['pending', 'in_progress', 'completed', 'failed'].includes(row.status)))
+                throw protocolError();
+            let tool = tools.get(row.toolCallId);
+            if (!tool) {
+                if (tools.size >= 10000)
+                    throw new Error('Qoder ACP tool notification limit exceeded');
+                tool = { name: row.title || row.kind || 'Qoder tool', ended: false };
+                tools.set(row.toolCallId, tool);
+                push({ type: 'tool-start', id: row.toolCallId, name: tool.name, ...(owns(row, 'rawInput') ? { input: row.rawInput } : {}) });
+            }
+            // In-progress tool updates can carry output without emitting a new bridge
+            // event. Count them too, but not repeated updates to an already-ended tool.
+            if (!tool.ended)
+                progress();
+            if (!tool.ended && (row.status === 'completed' || row.status === 'failed')) {
+                tool.ended = true;
+                push({ type: 'tool-end', id: row.toolCallId, name: tool.name, ...(owns(row, 'rawOutput') ? { output: row.rawOutput } : owns(row, 'content') ? { output: row.content } : {}), isError: row.status === 'failed' });
+            }
+        }
+        // No verified Qoder usage extension: never invent billable token counts.
+    };
+    const accept = (value) => {
+        if (!object(value) || value.jsonrpc !== '2.0')
+            throw protocolError();
+        if (owns(value, 'method')) {
+            if (typeof value.method !== 'string' || !value.method || owns(value, 'result') || owns(value, 'error'))
+                throw protocolError();
+            if (promptResponded && (value.method !== 'session/update' || owns(value, 'id')))
+                throw protocolError();
+            if (owns(value, 'params') && !object(value.params) && !Array.isArray(value.params))
+                throw protocolError();
+            if (['session/update', 'session/request_permission'].includes(value.method) && !object(value.params))
+                throw protocolError();
+            const params = (value.params ?? {});
+            if (owns(value, 'id')) {
+                if (!validId(value.id))
+                    throw protocolError();
+                if (value.method === 'session/request_permission') {
+                    if (!sessionId || params.sessionId !== sessionId || !object(params.toolCall) || !Array.isArray(params.options))
+                        throw protocolError();
+                    send({ jsonrpc: '2.0', id: value.id, result: { outcome: { outcome: 'cancelled' } } });
+                    fail(new Error('Qoder ACP permission request cancelled: this non-interactive bridge never approves residual permission prompts, Review and run the action in an interactive Qoder session.'));
+                }
+                else {
+                    send({ jsonrpc: '2.0', id: value.id, error: { code: -32601, message: 'Method not found' } });
+                }
+            }
+            else if (value.method === 'session/update') {
+                update(params);
+            }
+            else if (value.method === 'session/request_permission') {
+                throw protocolError();
+            }
+            return;
+        }
+        if (!validId(value.id) || owns(value, 'params') || owns(value, 'result') === owns(value, 'error'))
+            throw protocolError();
+        const entry = pending.get(value.id);
+        if (!entry)
+            throw protocolError();
+        if (owns(value, 'error')) {
+            if (!object(value.error) || !Number.isSafeInteger(value.error.code) || typeof value.error.message !== 'string')
+                throw protocolError();
+            pending.delete(value.id);
+            // ACP standard authentication-required error; never classify message text.
+            const cause = new Error(value.error.code === -32000 ? 'Qoder account requires authorization' : 'Qoder ACP request failed (server error details omitted)');
+            if (value.error.code === -32000)
+                cause.name = 'QoderAuthError';
+            entry.reject(cause);
+        }
+        else {
+            // A session response and its first notification can share one stdout
+            // chunk; record the ID synchronously, before the driver's await resumes.
+            if (entry.method === 'session/new') {
+                if (!object(value.result) || typeof value.result.sessionId !== 'string' || !value.result.sessionId || value.result.sessionId.length > 512)
+                    throw protocolError();
+                if (setupSessionId && setupSessionId !== value.result.sessionId)
+                    throw protocolError();
+                sessionId = value.result.sessionId;
+            }
+            // A matched setup response starts the next phase's idle budget. Prompt
+            // completion ends the watchdog even if the consumer is draining events.
+            if (entry.method === 'session/prompt') {
+                promptResponded = true;
+                clearTimeout(timer);
+            }
+            else
+                progress();
+            pending.delete(value.id);
+            entry.resolve(value.result);
+        }
+    };
+    const onData = (chunk) => {
+        // During successful shutdown still validate frames and accept session
+        // metadata. stdout chunk boundaries must not decide whether a frame is valid.
+        if (failure || (stopping && !promptResponded))
+            return;
+        try {
+            for (const value of decoder.push(chunk))
+                accept(value);
+        }
+        catch {
+            fail(new Error('Invalid or oversized Qoder ACP stream (content omitted)'));
+        }
+    };
+    const onEnd = () => {
+        // During successful shutdown still validate frames and accept session
+        // metadata. stdout chunk boundaries must not decide whether a frame is valid.
+        if (failure || (stopping && !promptResponded))
+            return;
+        try {
+            for (const value of decoder.finish())
+                accept(value);
+            if (!promptResponded)
+                fail(new Error('Qoder ACP stream ended before prompt completion'));
+        }
+        catch {
+            fail(new Error('Invalid or oversized Qoder ACP stream (content omitted)'));
+        }
+    };
+    const onProcessError = () => fail(new Error('Unable to start or communicate with Qoder ACP process'));
+    const onPipeError = () => { if (!stopping)
+        fail(new Error('Qoder ACP connection failed')); };
+    const onClose = (code) => {
+        closed = true;
+        resolveClosed();
+        if (!stopping && (!finished || code !== 0))
+            fail(new Error('Qoder ACP process exited before successful completion (diagnostics omitted)'));
+        notify();
+    };
+    const onSpawn = () => {
+        try {
+            request.onSpawn?.();
+        }
+        catch {
+            fail(new Error('Qoder lifecycle callback failed'));
+        }
+    };
+    const onAbort = () => fail(abortError());
+    // Only validated text/thought/tool progress and matched setup replies renew
+    // this watchdog: stderr, partial frames and unrelated metadata cannot keep a
+    // stalled task alive. Explicit cancellation and bounded cleanup stay unchanged.
+    const timer = setTimeout(() => fail(Object.assign(new Error(`Qoder ACP request timed out after ${timeoutMs}ms without progress`), { name: 'TimeoutError' })), timeoutMs);
+    request.signal?.addEventListener('abort', onAbort, { once: true });
+    child.once('spawn', onSpawn);
+    child.on('error', onProcessError);
+    child.once('close', onClose);
+    child.stdin.on('error', onPipeError);
+    child.stdout.on('error', onPipeError);
+    child.stderr.on('error', onPipeError);
+    child.stdout.on('data', onData);
+    child.stdout.once('end', onEnd);
+    // stderr is intentionally discarded, not attached to errors: it can contain
+    // authentication tokens and private backend URLs. resume also prevents stalls.
+    child.stderr.resume();
+    if (request.signal?.aborted)
+        onAbort();
+    const driver = (async () => {
+        try {
+            const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.0' } });
+            if (!object(init) || init.protocolVersion !== 1 || !object(init.agentCapabilities))
+                throw protocolError();
+            if (failure)
+                throw failure;
+            const session = await rpc('session/new', { cwd: request.cwd, mcpServers: [] });
+            if (!object(session) || typeof session.sessionId !== 'string' || !session.sessionId)
+                throw protocolError();
+            sessionId = session.sessionId;
+            const models = object(session.models) ? session.models : {};
+            if (request.model && models.currentModelId !== request.model) {
+                await rpc('session/set_model', { sessionId, modelId: request.model });
+                models.currentModelId = request.model;
+            }
+            if (isModelIdentifier(models.currentModelId))
+                push({ type: 'metadata', model: models.currentModelId });
+            if (failure)
+                throw failure;
+            const result = await rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text: request.prompt }] });
+            if (!object(result) || typeof result.stopReason !== 'string')
+                throw protocolError();
+            if (result.stopReason !== 'end_turn') {
+                const reasons = { cancelled: 'cancelled', refusal: 'refused', max_tokens: 'stopped at the token limit', max_turn_requests: 'stopped at the turn limit' };
+                const reason = owns(reasons, result.stopReason) ? reasons[result.stopReason] : 'stopped without end_turn';
+                throw new Error(`Qoder ACP request ${reason}`);
+            }
+            finished = true;
+            notify();
+        }
+        catch (error) {
+            fail(error instanceof Error ? error : new Error('Qoder ACP request failed'));
+        }
+    })();
+    let finalResult;
+    let primaryError;
+    let hasPrimaryError = false;
+    try {
+        while (true) {
+            if (failure)
+                throw failure;
+            const next = queue.shift();
+            if (next) {
+                queueBytes -= next.bytes;
+                yield next.event;
+                continue;
+            }
+            if (finished)
+                break;
+            await new Promise(resolve => { wake = resolve; });
+        }
+        // The prompt RPC is the completion boundary; the ACP server normally stays
+        // alive awaiting another prompt. Stop it before publishing the final result.
+        await terminate(false);
+        if (failure)
+            throw failure;
+        if (cleanupFailure)
+            throw cleanupFailure;
+        // Preserve queued display events while shutdown completes.
+        // Drain it before the final result rather than dropping it in finally.
+        while (queue.length) {
+            if (failure)
+                throw failure;
+            const next = queue.shift();
+            queueBytes -= next.bytes;
+            yield next.event;
+        }
+        if (failure)
+            throw failure;
+        finalResult = { type: 'result', sessionId, text: output };
+    }
+    catch (error) {
+        primaryError = error;
+        hasPrimaryError = true;
+        throw error;
+    }
+    finally {
+        clearTimeout(timer);
+        request.signal?.removeEventListener('abort', onAbort);
+        rejectPending(failure ?? new Error('Qoder ACP consumer closed'));
+        await terminate(!finished);
+        await driver;
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
+        child.removeListener('spawn', onSpawn);
+        child.removeListener('close', onClose);
+        child.stdout.removeListener('data', onData);
+        child.stdout.removeListener('end', onEnd);
+        // Error listeners remain until the stream destroy callbacks run, preventing
+        // late EPIPE from becoming an unhandled error. once-close then removes them.
+        const removeErrors = () => {
+            child.removeListener('error', onProcessError);
+            child.stdin.removeListener('error', onPipeError);
+            child.stdout.removeListener('error', onPipeError);
+            child.stderr.removeListener('error', onPipeError);
+        };
+        if (closed)
+            removeErrors();
+        else
+            child.once('close', removeErrors);
+        queue.length = 0;
+        tools.clear();
+        wake = undefined;
+        if (cleanupFailure) {
+            if (!hasPrimaryError)
+                throw cleanupFailure;
+            // Preserve the original instance/name (notably auth, abort and timeout).
+            // Only our fixed diagnostic is attached; subprocess exceptions stay private.
+            if (primaryError instanceof Error && primaryError !== cleanupFailure) {
+                try {
+                    Object.defineProperty(primaryError, 'cleanupError', { value: cleanupFailure, configurable: true });
+                    primaryError.message += `; secondary cleanup failure: ${cleanupFailure.message}`;
+                }
+                catch { /* A frozen consumer error must still remain the primary error. */ }
+            }
+        }
+    }
+    // Nothing remains live while the consumer holds the final yielded event.
+    if (finalResult)
+        yield finalResult;
+}
+//# sourceMappingURL=acp.js.map

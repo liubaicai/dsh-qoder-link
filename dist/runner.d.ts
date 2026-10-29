@@ -1,4 +1,5 @@
-import { type BridgeEvent } from './protocol.ts';
+import { type ChildProcess } from 'node:child_process';
+import type { BridgeEvent } from './protocol.ts';
 export type { BridgeEvent } from './protocol.ts';
 export interface QoderRequest {
     prompt: string;
@@ -11,7 +12,11 @@ export interface QoderRequest {
     permissionMode?: 'dont_ask' | 'accept_edits' | 'default';
     tools?: string;
     bin?: string;
+    /** Inactivity budget, renewed only by validated ACP progress. */
     timeoutMs?: number;
+    /** PAT for this process only; never passed on argv or persisted. */
+    authToken?: string;
+    cliVariant?: 'qodercli' | 'qoderclicn';
     signal?: AbortSignal;
 }
 /** Resolve npm's Windows launchers without ever invoking cmd.exe or PowerShell. */
@@ -26,6 +31,7 @@ export declare function resolveQoderBin(bin?: string, cwd?: string): Promise<{
  * timeout. ELECTRON_RUN_AS_NODE makes an Electron binary behave as plain Node;
  * a real Node executable simply ignores the variable.
  */
-export declare function childEnv(): NodeJS.ProcessEnv;
-/** One fresh CLI process per call; the complete conversation belongs in prompt. */
+export declare function childEnv(authToken?: string, cliVariant?: 'qodercli' | 'qoderclicn'): NodeJS.ProcessEnv;
+export declare function killTree(child: ChildProcess): Promise<void>;
+/** One fresh native ACP session per complete conversation prompt. */
 export declare function runQoder(request: QoderRequest): AsyncGenerator<BridgeEvent>;

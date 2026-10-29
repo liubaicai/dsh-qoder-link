@@ -2,8 +2,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { access, readFile, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
-import { QoderProtocol, NdjsonDecoder, type BridgeEvent } from './protocol.ts';
+import { runQoderAcp } from './acp.ts';
+import type { BridgeEvent } from './protocol.ts';
 export type { BridgeEvent } from './protocol.ts';
 
 export interface QoderRequest {
@@ -17,12 +17,14 @@ export interface QoderRequest {
   permissionMode?: 'dont_ask' | 'accept_edits' | 'default';
   tools?: string;
   bin?: string;
+  /** Inactivity budget, renewed only by validated ACP progress. */
   timeoutMs?: number;
+  /** PAT for this process only; never passed on argv or persisted. */
+  authToken?: string;
+  cliVariant?: 'qodercli' | 'qoderclicn';
   signal?: AbortSignal;
 }
 
-const STDERR_LIMIT = 16 * 1024;
-const DEFAULT_TIMEOUT = 10 * 60 * 1000;
 
 /** Resolve npm's Windows launchers without ever invoking cmd.exe or PowerShell. */
 export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Promise<{ command: string; args: string[] }> {
@@ -56,7 +58,6 @@ export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Pr
   throw new Error('Qoder executable not found; install qodercli or configure bin');
 }
 
-function abortError(): Error { const error = new Error('Qoder request aborted'); error.name = 'AbortError'; return error; }
 
 /**
  * Children must run as plain Node. When the DSH host is an Electron app,
@@ -65,11 +66,17 @@ function abortError(): Error { const error = new Error('Qoder request aborted');
  * timeout. ELECTRON_RUN_AS_NODE makes an Electron binary behave as plain Node;
  * a real Node executable simply ignores the variable.
  */
-export function childEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+export function childEnv(authToken?: string, cliVariant: 'qodercli' | 'qoderclicn' = 'qodercli'): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  if (authToken !== undefined) {
+    // Managed identity must never inherit another account or region's PAT.
+    for (const key of Object.keys(env)) if (['QODER_PERSONAL_ACCESS_TOKEN', 'QODERCN_PERSONAL_ACCESS_TOKEN'].includes(key.toUpperCase())) delete env[key];
+    env[cliVariant === 'qoderclicn' ? 'QODERCN_PERSONAL_ACCESS_TOKEN' : 'QODER_PERSONAL_ACCESS_TOKEN'] = authToken;
+  }
+  return env;
 }
 
-async function killTree(child: ChildProcess): Promise<void> {
+export async function killTree(child: ChildProcess): Promise<void> {
   if (!child.pid) return;
   if (process.platform === 'win32') {
     await new Promise<void>(resolveKill => {
@@ -84,69 +91,7 @@ async function killTree(child: ChildProcess): Promise<void> {
   }
 }
 
-/** One fresh CLI process per call; the complete conversation belongs in prompt. */
+/** One fresh native ACP session per complete conversation prompt. */
 export async function* runQoder(request: QoderRequest): AsyncGenerator<BridgeEvent> {
-  if (request.signal?.aborted) throw abortError();
-  if (typeof request.prompt !== 'string' || !request.cwd) throw new TypeError('prompt and cwd are required');
-  const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new RangeError('timeoutMs must be a positive finite timer duration');
-  if (request.permissionMode && !['dont_ask', 'accept_edits', 'default'].includes(request.permissionMode)) throw new TypeError('Unsupported permissionMode');
-  const executable = await resolveQoderBin(request.bin, request.cwd);
-  if (request.signal?.aborted) throw abortError();
-  const args = [...executable.args, '--print', '--output-format', 'stream-json', '--input-format', 'text', '--permission-mode', request.permissionMode ?? 'dont_ask', '--tools', request.tools ?? '', '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', ''];
-  for (const [flag, value] of [['--system-prompt', request.systemPrompt], ['--model', request.model], ['--reasoning-effort', request.effort]] as const) {
-    if (value !== undefined) args.push(flag, value);
-  }
-  const child = spawn(executable.command, args, { cwd: request.cwd, env: childEnv(), shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
-  let failure: Error | undefined;
-  let closed = false;
-  let stderr = '';
-  const stderrDecoder = new StringDecoder('utf8');
-  let termination: Promise<void> | undefined;
-  const terminate = (): Promise<void> => termination ??= killTree(child);
-  const fail = (error: Error): void => { failure ??= error; void terminate(); child.stdout.destroy(error); };
-  const onAbort = (): void => fail(abortError());
-  const timer = setTimeout(() => { const error = new Error(`Qoder request timed out after ${timeoutMs}ms`); error.name = 'TimeoutError'; fail(error); }, timeoutMs);
-  request.signal?.addEventListener('abort', onAbort, { once: true });
-  const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit => {
-    child.once('spawn', () => {
-      try { request.onSpawn?.(); }
-      catch { fail(new Error('Qoder lifecycle callback failed')); }
-    });
-    child.once('error', error => { failure ??= error; });
-    child.once('close', (code, signal) => { closed = true; resolveExit({ code, signal }); });
-  });
-  child.stderr.on('data', (chunk: Buffer) => { stderr = (stderr + stderrDecoder.write(chunk)).slice(-STDERR_LIMIT); });
-  child.stderr.on('end', () => { stderr = (stderr + stderrDecoder.end()).slice(-STDERR_LIMIT); });
-  // EPIPE is expected when the child rejects options before reading stdin.
-  child.stdin.on('error', error => { if ((error as NodeJS.ErrnoException).code !== 'EPIPE') fail(error); });
-  child.stdin.end(request.prompt);
-  if (request.signal?.aborted) onAbort();
-  const decoder = new NdjsonDecoder();
-  const protocol = new QoderProtocol();
-  let result: Extract<BridgeEvent, { type: 'result' }> | undefined;
-  try {
-    for await (const chunk of child.stdout) {
-      if (failure) throw failure;
-      for (const value of decoder.push(chunk as Buffer)) for (const event of protocol.accept(value)) {
-        if (event.type === 'result') result = event; else yield event;
-      }
-    }
-    for (const value of decoder.finish()) for (const event of protocol.accept(value)) {
-      if (event.type === 'result') result = event; else yield event;
-    }
-    const status = await exit;
-    if (failure) throw failure;
-    // Captured stderr is bounded but never exposed: it may contain login secrets.
-    if (status.code !== 0) throw new Error(`Qoder exited with ${status.code === null ? `signal ${status.signal}` : `code ${status.code}`}${stderr ? ' (stderr omitted)' : ''}`);
-    if (!protocol.hasResult || !result) throw new Error('Qoder exited without a result');
-    yield result;
-  } catch (error) {
-    throw failure ?? error;
-  } finally {
-    clearTimeout(timer);
-    request.signal?.removeEventListener('abort', onAbort);
-    if (!closed || termination) await terminate();
-    child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
-  }
+  yield* runQoderAcp(request);
 }

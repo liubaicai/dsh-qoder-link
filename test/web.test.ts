@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SettingsStore } from '../src/settings.ts'
 import { registerSettingsRoutes } from '../src/web.ts'
+import { AccountStore } from '../src/accounts.ts'
+import { AccountService } from '../src/account-service.ts'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
 async function fixture(run: (ctx: {base: string; store: SettingsStore; notifications: () => number; routes: Map<string, Handler>; dispose: () => void}) => Promise<void>, runs: unknown[] = []) {
@@ -71,4 +73,29 @@ test('metadata snapshots redact run internals and retain newest five', async () 
     assert.equal(body.runs[0].contextOverrideSent, false)
     assert.equal(body.runs[0].reasoningConfirmed, false)
   }, [...runs, {id: 'bad', source: 'model', state: 'secret-state', queuedAt: 999}])
+})
+
+test('account routes enforce origin and JSON, reject cross-region writes, never disclose PAT',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'qoder-account-web-')),routes=new Map<string,Handler>()
+  const settings=new SettingsStore({},join(dir,'settings.json')),accounts=new AccountService(new AccountStore(join(dir,'accounts.json')),settings.config)
+  const dispose=registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}},settings,()=>{},()=>[],accounts)
+  const server=createServer((req,res)=>{const handler=routes.get(req.url||'');if(handler)handler(req,res);else{res.writeHead(404);res.end()}})
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const address=server.address();assert.ok(address && typeof address==='object')
+  const base=`http://127.0.0.1:${address.port}/plugins/qoder-link`
+  try{
+    const input={cliVariant:'qodercli',name:'Test',token:'SECRET-PAT'}
+    assert.equal((await fetch(base+'/accounts/add',post(input,{Origin:'https://evil.test'}))).status,403)
+    assert.equal((await fetch(base+'/accounts/add',{method:'POST',body:JSON.stringify(input)})).status,415)
+    assert.equal((await fetch(base+'/accounts/add',post({...input,cliVariant:'qoderclicn'}))).status,400)
+    const added=await fetch(base+'/accounts/add',post(input));assert.equal(added.status,200)
+    const text=await added.text();assert.doesNotMatch(text,/SECRET|token/);const snapshot=JSON.parse(text)
+    const id=snapshot.accounts[0].id
+    assert.equal(snapshot.managed,true);assert.equal(snapshot.selectedAccountId,id)
+    assert.equal((await fetch(base+'/accounts/update',post({id,token:'SECRET\nINVALID'}))).status,400)
+    const status=await (await fetch(base+'/status')).text();assert.doesNotMatch(status,/SECRET|token/)
+    await fetch(base+'/accounts/remove',post({id}))
+    const empty=await (await fetch(base+'/accounts')).json();assert.equal(empty.managed,true);assert.deepEqual(empty.accounts,[])
+    await assert.rejects(accounts.acquire({prompt:'test',cwd:dir}))
+    const oversized=await fetch(base+'/accounts/add',post({...input,token:'SECRET'.repeat(6000)}));assert.equal(oversized.status,400);assert.doesNotMatch(await oversized.text(),/SECRET/)
+  }finally{dispose();await new Promise<void>(resolve=>{server.close(()=>resolve());server.closeAllConnections()});rmSync(dir,{recursive:true,force:true})}
 })

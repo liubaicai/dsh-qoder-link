@@ -12,6 +12,7 @@ export interface PluginConfig {
     workspaceRoot: string;
     permissionMode: 'dont_ask' | 'default' | 'accept_edits';
     tools: string;
+    /** ACP inactivity budget; progress resets this deadline. */
     timeoutMs: number;
     reasoningEffort: string;
     maxConcurrency: number;

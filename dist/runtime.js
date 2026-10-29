@@ -10,7 +10,8 @@ export class CallRuntime {
     records = new Map();
     queue = [];
     active = 0;
-    constructor(config) { this.config = config; }
+    accounts;
+    constructor(config, accounts) { this.config = config; this.accounts = accounts; }
     snapshots() {
         const now = Date.now();
         return [...this.records.values()].reverse().map(record => ({
@@ -78,8 +79,14 @@ export class CallRuntime {
         this.records.set(record.id, record);
         this.prune();
         let release;
+        let account;
+        // Pin transport identity before any await; later config edits must not switch account regions.
+        request = { ...request, cliVariant: request.cliVariant ?? this.config.cliVariant };
         try {
             release = await this.acquire(record.id, request.signal);
+            account = await this.accounts?.acquire(request);
+            const authToken = this.accounts ? this.accounts.beforeRun(account, request) : request.authToken;
+            request = { ...request, authToken };
             if (request.signal?.aborted)
                 throw error('AbortError', 'Qoder request aborted');
             record.state = 'starting';
@@ -119,6 +126,7 @@ export class CallRuntime {
                 record.failure = 'aborted';
             }
             record.endedAt = Date.now();
+            account?.release();
             release?.();
             this.prune();
         }

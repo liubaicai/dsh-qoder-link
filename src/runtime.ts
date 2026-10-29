@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import type { AccountService } from './account-service.ts'
+import type { AccountLease } from './account-scheduler.ts'
 import { isModelIdentifier as identifier } from './metadata.ts'
 import { isQoderEffort, type PluginConfig } from './config.ts'
 import { runQoder, type QoderRequest, type BridgeEvent } from './runner.ts'
@@ -34,7 +36,8 @@ export class CallRuntime {
   private readonly records = new Map<string, RunSnapshot>()
   private readonly queue: Waiter[] = []
   private active = 0
-  constructor(config: PluginConfig) { this.config = config }
+  private readonly accounts?: AccountService
+  constructor(config: PluginConfig, accounts?: AccountService) { this.config = config; this.accounts = accounts }
   snapshots(): RunSnapshot[] {
     const now = Date.now()
     return [...this.records.values()].reverse().map(record => ({
@@ -90,8 +93,14 @@ export class CallRuntime {
     this.records.set(record.id, record)
     this.prune()
     let release: (() => void) | undefined
+    let account: AccountLease | undefined
+    // Pin transport identity before any await; later config edits must not switch account regions.
+    request = { ...request, cliVariant: request.cliVariant ?? this.config.cliVariant }
     try {
       release = await this.acquire(record.id, request.signal)
+      account = await this.accounts?.acquire(request)
+      const authToken = this.accounts ? this.accounts.beforeRun(account, request) : request.authToken
+      request = { ...request, authToken }
       if (request.signal?.aborted) throw error('AbortError', 'Qoder request aborted')
       record.state = 'starting'; record.startedAt = Date.now()
       for await (const event of runner({ ...request, onSpawn: () => {
@@ -118,7 +127,7 @@ export class CallRuntime {
       throw cause
     } finally {
       if (!terminal(record.state)) { record.state = 'cancelled'; record.failure = 'aborted' }
-      record.endedAt = Date.now(); release?.(); this.prune()
+      record.endedAt = Date.now(); account?.release(); release?.(); this.prune()
     }
   }
 }
