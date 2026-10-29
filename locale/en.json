@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Qoder Link",
-    "description": "Connect DSH models and tools through native ACP and the official Qoder CLI, with isolated international and China PAT accounts, fixed-account selection, and account pools."
+    "description": "Connect DSH conversations and standalone delegation through native ACP and the official Qoder CLI, using local CLI sign-in and model discovery for the international or China region."
   }
 }

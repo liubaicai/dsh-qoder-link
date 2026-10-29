@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Qoder 桥接",
-    "description": "通过原生 ACP 接入官方 Qoder CLI，支持国际版与中国版隔离的 PAT 多账户、固定账户或账户池，连接 DSH 对话和工具调用。"
+    "description": "通过原生 ACP 接入官方 Qoder CLI，使用国际版或中国版 CLI 本地登录态，获取当前区域模型并连接 DSH 对话和独立委派。"
   }
 }

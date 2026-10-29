@@ -2,7 +2,7 @@ import {readFileSync,existsSync} from 'node:fs';
 import assert from 'node:assert/strict';
 const root=new URL('../',import.meta.url);
 const pkg=JSON.parse(readFileSync(new URL('package.json',root),'utf8'));
-for(const path of ['dist/index.js','dist/index.d.ts','dist/client.js','dist/runner.js','dist/acp.js','dist/acp-cleanup.js','dist/acp-messages.js','dist/accounts.js','dist/account-service.js','dist/account-scheduler.js','dist/protocol.js','assets/qoder.png','cordis.patch.yml','locale/zh.json','locale/en.json','LICENSE','NOTICE']) assert.ok(existsSync(new URL(path,root)), 'Missing package file: '+path);
+for(const path of ['dist/index.js','dist/index.d.ts','dist/client.js','dist/runner.js','dist/acp.js','dist/acp-cleanup.js','dist/acp-messages.js','dist/models.js','dist/protocol.js','assets/qoder.png','cordis.patch.yml','locale/zh.json','locale/en.json','LICENSE','NOTICE']) assert.ok(existsSync(new URL(path,root)), 'Missing package file: '+path);
 assert.equal(pkg.name,'dsh-qoder-link');
 assert.ok(readFileSync(new URL('dist/client.js',root),'utf8').includes('window.__ModuleLoader__.load'));
 const {parseResponse}=await import('../dist/prompt.js');

@@ -1,4 +1,3 @@
-import type { AccountService } from './account-service.ts';
 import { type PluginConfig } from './config.ts';
 import { runQoder, type QoderRequest, type BridgeEvent } from './runner.ts';
 export interface RunSnapshot {
@@ -28,8 +27,7 @@ export declare class CallRuntime {
     private readonly records;
     private readonly queue;
     private active;
-    private readonly accounts?;
-    constructor(config: PluginConfig, accounts?: AccountService);
+    constructor(config: PluginConfig);
     snapshots(): RunSnapshot[];
     private prune;
     /** Re-evaluate live concurrency changes without interrupting active calls. */

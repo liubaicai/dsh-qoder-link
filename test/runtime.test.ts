@@ -1,17 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {mkdtempSync,rmSync} from 'node:fs'
-import {tmpdir} from 'node:os'
-import {join} from 'node:path'
-import {AccountStore} from '../src/accounts.ts'
-import {AccountService} from '../src/account-service.ts'
 import { setTimeout as delay } from 'node:timers/promises'
 import { resolveConfig } from '../src/config.ts'
 import { resolveEffort } from '../src/effort.ts'
 import { CallRuntime } from '../src/runtime.ts'
 import type { runQoder, BridgeEvent } from '../src/runner.ts'
 
-const request = { prompt: 'SECRET-PROMPT', cwd: 'SECRET-PATH', authToken: 'SECRET-TOKEN', model: 'hy3', effort: 'high' }
+const request = { prompt: 'SECRET-PROMPT', cwd: 'SECRET-PATH', model: 'hy3', effort: 'high' }
 async function collect(events: AsyncIterable<BridgeEvent>) { const result = []; for await (const event of events) result.push(event); return result }
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } }
 
@@ -144,22 +139,13 @@ test('both paths use strict shared effort precedence and explicit auto', () => {
   for (const invalid of ['mega', '', null, 3]) assert.throws(() => resolveEffort(invalid, 'high'), /Unsupported reasoning effort/)
 })
 
-test('managed runtime injects only request token, releases on failure/return and fails closed after removal',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'qoder-runtime-accounts-'))
-  try {
-    const cfg=resolveConfig({},{}),store=new AccountStore(join(dir,'accounts.json')),accounts=new AccountService(store,cfg),runtime=new CallRuntime(cfg,accounts)
-    const row=store.add({cliVariant:'qodercli',name:'Test',token:'SECRET-MANAGED'})
-    const runner:typeof runQoder=async function*(req){assert.equal(req.authToken,'SECRET-MANAGED');assert.equal(req.cliVariant,'qodercli');yield {type:'text',delta:'hello'};throw new Error('failure')}
-    await assert.rejects(collect(runtime.run(request,'model',runner)),/failure/)
-    assert.deepEqual(accounts.scheduler.activeCounts(),{})
-    const iterator=runtime.run(request,'ask',runner);await iterator.next();await iterator.return(undefined)
-    assert.deepEqual(accounts.scheduler.activeCounts(),{})
-    assert.doesNotMatch(JSON.stringify(runtime.snapshots()),/SECRET-MANAGED/)
-    accounts.remove(row.id)
-    let ran=false
-    await assert.rejects(collect(runtime.run(request,'model',async function*(){ran=true;yield {type:'result',text:''}})))
-    assert.equal(ran,false)
-    store.add({cliVariant:'qoderclicn',name:'CN',token:'SECRET-CN'})
-    await collect(runtime.run({...request,cliVariant:'qoderclicn'},'model',async function*(req){assert.equal(req.authToken,'SECRET-CN');yield {type:'result',text:''}}))
-  }finally{rmSync(dir,{recursive:true,force:true})}
+test('runtime preserves regional request identity and does not inject authentication', async () => {
+  const cfg=resolveConfig({},{}),runtime=new CallRuntime(cfg)
+  for(const cliVariant of ['qodercli','qoderclicn'] as const) {
+    await collect(runtime.run({...request,cliVariant},'model',async function*(req){
+      assert.equal(req.cliVariant,cliVariant)
+      assert.equal('authToken' in req,false)
+      yield {type:'result',text:''}
+    }))
+  }
 })

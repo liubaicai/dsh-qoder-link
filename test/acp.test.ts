@@ -127,31 +127,22 @@ test('requested model is selected through ACP when session differs', async t => 
 });
 test('standard auth error is named and diagnostics are secret-safe', async t => {
   const f = await setup(t);
-  await assert.rejects(collect({ ...f, prompt: 'auth-error', authToken: 'SECRET_TOKEN' }), (e: unknown) => e instanceof Error && e.name === 'QoderAuthError' && !e.message.includes('SECRET_TOKEN'));
+  await assert.rejects(collect({ ...f, prompt: 'auth-error' }), (e: unknown) => e instanceof Error && e.name === 'QoderAuthError' && !e.message.includes('SECRET_TOKEN'));
 });
-test('PAT is subprocess-only and regional inherited credentials are cleared', async t => {
+test('both CLI regions use local login without injecting inherited credentials', async t => {
   const f = await setup(t);
   const original = process.env.QODER_PERSONAL_ACCESS_TOKEN;
   const cnOriginal = process.env.QODERCN_PERSONAL_ACCESS_TOKEN;
   process.env.QODER_PERSONAL_ACCESS_TOKEN = 'old-international';
   process.env.QODERCN_PERSONAL_ACCESS_TOKEN = 'old-cn';
   try {
-    const cn = childEnv('test-cn', 'qoderclicn');
-    assert.equal(cn.QODERCN_PERSONAL_ACCESS_TOKEN, 'test-cn');
-    assert.equal(cn.QODER_PERSONAL_ACCESS_TOKEN, undefined);
-    const international = childEnv('test-pat', 'qodercli');
-    assert.equal(international.QODERCN_PERSONAL_ACCESS_TOKEN, undefined);
-    assert.equal(international.QODER_PERSONAL_ACCESS_TOKEN, 'test-pat');
-    const events = await collect({ ...f, prompt: 'env', authToken: 'test-pat' });
-    const result = events.at(-1);
-    assert.equal(result?.type === 'result' && result.text, 'true');
+    const env = childEnv();
+    assert.equal(env.QODERCN_PERSONAL_ACCESS_TOKEN, undefined);
+    assert.equal(env.QODER_PERSONAL_ACCESS_TOKEN, undefined);
     for (const cliVariant of ['qodercli', 'qoderclicn'] as const) {
-      for (const authToken of [undefined, 'selected-token']) {
-        const snapshot = (await collect({ ...f, prompt: 'env-snapshot', cliVariant, authToken })).at(-1);
-        assert.equal(snapshot?.type, 'result');
-        const expectedKey = cliVariant === 'qoderclicn' ? 'QODERCN_PERSONAL_ACCESS_TOKEN' : 'QODER_PERSONAL_ACCESS_TOKEN';
-        assert.deepEqual(snapshot?.type === 'result' ? JSON.parse(snapshot.text) : null, authToken ? { [expectedKey]: authToken } : {});
-      }
+      const snapshot = (await collect({ ...f, prompt: 'env-snapshot', cliVariant })).at(-1);
+      assert.equal(snapshot?.type, 'result');
+      assert.deepEqual(snapshot?.type === 'result' ? JSON.parse(snapshot.text) : null, {});
     }
     assert.equal(process.env.QODER_PERSONAL_ACCESS_TOKEN, 'old-international');
     assert.equal(process.env.QODERCN_PERSONAL_ACCESS_TOKEN, 'old-cn');

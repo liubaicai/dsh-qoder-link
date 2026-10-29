@@ -165,17 +165,11 @@ test('childEnv always removes both regional PAT casing variants without changing
   const host = { ...original, HOME: '/disk-login-home', USERPROFILE: 'C:\\disk-login-home', ...Object.fromEntries(keys.map(key => [key, 'host-secret'])) };
   process.env = host;
   try {
-    for (const cliVariant of ['qodercli', 'qoderclicn'] as const) {
-      for (const authToken of [undefined, 'selected-account-token']) {
-        const env = childEnv(authToken, cliVariant);
-        const expectedKey = cliVariant === 'qoderclicn' ? 'QODERCN_PERSONAL_ACCESS_TOKEN' : 'QODER_PERSONAL_ACCESS_TOKEN';
-        assert.deepEqual(Object.keys(env).filter(key => keys.some(pat => pat.toUpperCase() === key.toUpperCase())), authToken ? [expectedKey] : []);
-        if (authToken) assert.equal(env[expectedKey], authToken);
-        assert.equal(env.HOME, host.HOME);
-        assert.equal(env.USERPROFILE, host.USERPROFILE);
-        assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
-      }
-    }
+    const env = childEnv();
+    assert.deepEqual(Object.keys(env).filter(key => keys.some(pat => pat.toUpperCase() === key.toUpperCase())), []);
+    assert.equal(env.HOME, host.HOME);
+    assert.equal(env.USERPROFILE, host.USERPROFILE);
+    assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
     for (const key of keys) assert.equal(process.env[key], 'host-secret');
   } finally { process.env = original; }
 });

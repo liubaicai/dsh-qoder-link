@@ -8,8 +8,7 @@ import { CallRuntime } from './runtime.ts'
 import { runQoder } from './runner.ts'
 import { SettingsStore } from './settings.ts'
 import { registerSettingsRoutes, type WebServerLike } from './web.ts'
-import { AccountStore } from './accounts.ts'
-import { AccountService } from './account-service.ts'
+import { discoverModels } from './models.ts'
 
 export const name = 'dsh-qoder-link'
 export const inject = ['llm', 'commands']
@@ -17,12 +16,11 @@ export const inject = ['llm', 'commands']
 export function apply(ctx: Context, entry: Record<string, unknown> = {}): void {
   const store = new SettingsStore(entry)
   const config = store.config
-  const accounts = new AccountService(new AccountStore(), config)
-  const runtime = new CallRuntime(config, accounts)
+  const runtime = new CallRuntime(config)
   ctx.inject(['webServer'], sub => {
     const server = sub.get('webServer') as WebServerLike | undefined
     if (!server) return
-    return registerSettingsRoutes(server, store, () => { runtime.refresh(); ctx.emit('llm/adapters-updated') }, () => runtime.snapshots(), accounts)
+    return registerSettingsRoutes(server, store, () => { runtime.refresh(); ctx.emit('llm/adapters-updated') }, () => runtime.snapshots(), snapshot => discoverModels(snapshot))
   })
   const sessionCwd = (id: string): string | undefined => {
     const sessions = ctx.get('sessions') as { get(id: unknown): {header?: {cwd?: string}} | undefined } | undefined
@@ -41,7 +39,7 @@ export function apply(ctx: Context, entry: Record<string, unknown> = {}): void {
         `Default model: ${config.defaultModel}; effort: ${config.reasoningEffort}`, `Transport: ACP stdio; concurrency: ${config.maxConcurrency}; inactivity timeout: ${config.timeoutMs}ms`,
         'Provider tools: DSH-managed; CLI built-in tools and MCP disabled.',
         `Delegation tools: ${config.tools || 'disabled'} (${config.permissionMode})`,
-        'Authentication: plugin-managed PAT accounts (fixed or pool); CLI-local login only before that region has managed accounts. Status does not verify credentials.',
+        'Authentication: existing login of the selected official CLI. The plugin does not manage accounts or credentials.',
       ].join('\n')}
       if (command !== 'help') return {kind:'error', text:'Unknown subcommand. Use /qoder help.'}
       return {kind:'success', text:'/qoder status — configuration\n/qoder models — enabled models\n/qoder runs — recent calls\nSelect qoder/default in DSH. Choose qodercli or qoderclicn in Qoder Link settings, install and log in to that CLI first.'}

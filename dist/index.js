@@ -7,20 +7,18 @@ import { CallRuntime } from "./runtime.js";
 import { runQoder } from "./runner.js";
 import { SettingsStore } from "./settings.js";
 import { registerSettingsRoutes } from "./web.js";
-import { AccountStore } from "./accounts.js";
-import { AccountService } from "./account-service.js";
+import { discoverModels } from "./models.js";
 export const name = 'dsh-qoder-link';
 export const inject = ['llm', 'commands'];
 export function apply(ctx, entry = {}) {
     const store = new SettingsStore(entry);
     const config = store.config;
-    const accounts = new AccountService(new AccountStore(), config);
-    const runtime = new CallRuntime(config, accounts);
+    const runtime = new CallRuntime(config);
     ctx.inject(['webServer'], sub => {
         const server = sub.get('webServer');
         if (!server)
             return;
-        return registerSettingsRoutes(server, store, () => { runtime.refresh(); ctx.emit('llm/adapters-updated'); }, () => runtime.snapshots(), accounts);
+        return registerSettingsRoutes(server, store, () => { runtime.refresh(); ctx.emit('llm/adapters-updated'); }, () => runtime.snapshots(), snapshot => discoverModels(snapshot));
     });
     const sessionCwd = (id) => {
         const sessions = ctx.get('sessions');
@@ -42,7 +40,7 @@ export function apply(ctx, entry = {}) {
                         `Default model: ${config.defaultModel}; effort: ${config.reasoningEffort}`, `Transport: ACP stdio; concurrency: ${config.maxConcurrency}; inactivity timeout: ${config.timeoutMs}ms`,
                         'Provider tools: DSH-managed; CLI built-in tools and MCP disabled.',
                         `Delegation tools: ${config.tools || 'disabled'} (${config.permissionMode})`,
-                        'Authentication: plugin-managed PAT accounts (fixed or pool); CLI-local login only before that region has managed accounts. Status does not verify credentials.',
+                        'Authentication: existing login of the selected official CLI. The plugin does not manage accounts or credentials.',
                     ].join('\n') };
             if (command !== 'help')
                 return { kind: 'error', text: 'Unknown subcommand. Use /qoder help.' };

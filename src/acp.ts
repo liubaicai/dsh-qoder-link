@@ -32,14 +32,13 @@ export async function* runQoderAcp(request: QoderRequest): AsyncGenerator<Bridge
   if (request.permissionMode && !['dont_ask', 'default', 'accept_edits'].includes(request.permissionMode)) throw new TypeError('Unsupported permissionMode');
   if (request.model !== undefined && !isModelIdentifier(request.model)) throw new TypeError('Invalid Qoder request model id');
   if (request.cliVariant !== undefined && !['qodercli', 'qoderclicn'].includes(request.cliVariant)) throw new TypeError('Unsupported cliVariant');
-  if (request.authToken !== undefined && (typeof request.authToken !== 'string' || !request.authToken.trim() || /[\r\n\0]/.test(request.authToken))) throw new TypeError('Invalid Qoder authToken');
   const executable = await resolveQoderBin(request.bin ?? request.cliVariant, request.cwd);
   if (request.signal?.aborted) throw abortError();
   const args = [...executable.args, '--acp', '--tools', request.tools ?? '', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--setting-sources', '', '--permission-mode', request.permissionMode ?? 'dont_ask'];
   for (const [flag, value] of [['--system-prompt', request.systemPrompt], ['--model', request.model], ['--reasoning-effort', request.effort]] as const) {
     if (value !== undefined) args.push(flag, value);
   }
-  const child = spawn(executable.command, args, { cwd: request.cwd, env: childEnv(request.authToken, request.cliVariant), shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(executable.command, args, { cwd: request.cwd, env: childEnv(), shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
   const decoder = new NdjsonDecoder(MAX_FRAME_BYTES);
   const pending = new Map<RpcId, { method: string; resolve(value: unknown): void; reject(error: Error): void }>();
   const queue: { event: BridgeEvent; bytes: number }[] = [];
@@ -273,7 +272,7 @@ export async function* runQoderAcp(request: QoderRequest): AsyncGenerator<Bridge
   if (request.signal?.aborted) onAbort();
   const driver = (async () => {
     try {
-      const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.1' } });
+      const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.2' } });
       if (!object(init) || init.protocolVersion !== 1 || !object(init.agentCapabilities)) throw protocolError();
       if (failure) throw failure;
       const session = await rpc('session/new', { cwd: request.cwd, mcpServers: [] });

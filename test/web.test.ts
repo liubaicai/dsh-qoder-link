@@ -5,17 +5,15 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SettingsStore } from '../src/settings.ts'
-import { registerSettingsRoutes } from '../src/web.ts'
-import { AccountStore } from '../src/accounts.ts'
-import { AccountService } from '../src/account-service.ts'
+import { registerSettingsRoutes, type RefreshModels } from '../src/web.ts'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
-async function fixture(run: (ctx: {base: string; store: SettingsStore; notifications: () => number; routes: Map<string, Handler>; dispose: () => void}) => Promise<void>, runs: unknown[] = []) {
+async function fixture(run: (ctx: {base: string; store: SettingsStore; notifications: () => number; routes: Map<string, Handler>; dispose: () => void}) => Promise<void>, runs: unknown[] = [], refreshModels?: RefreshModels) {
   const directory = mkdtempSync(join(tmpdir(), 'qoder-web-'))
   const routes = new Map<string, Handler>()
   const store = new SettingsStore({}, join(directory, 'settings.json'))
   let count = 0
-  const dispose = registerSettingsRoutes({register(route) {routes.set(route.path, route.handler); return () => routes.delete(route.path)}}, store, () => {count++}, () => runs)
+  const dispose = registerSettingsRoutes({register(route) {routes.set(route.path, route.handler); return () => routes.delete(route.path)}}, store, () => {count++}, () => runs, refreshModels)
   const server = createServer((req, res) => { const handler = routes.get(req.url || ''); if (handler) handler(req, res); else {res.writeHead(404); res.end()} })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
@@ -25,14 +23,14 @@ async function fixture(run: (ctx: {base: string; store: SettingsStore; notificat
 }
 const post = (body: unknown, headers = {}) => ({method: 'POST', headers: {'Content-Type': 'application/json', ...headers}, body: JSON.stringify(body)})
 
-test('only status/config routes, safe headers, separate paths and shared models', async () => {
+test('only status/config/models routes, safe headers, separate paths and shared models', async () => {
   await fixture(async ({base, store, notifications, routes, dispose}) => {
-    assert.deepEqual([...routes.keys()], ['/plugins/qoder-link/status', '/plugins/qoder-link/config'])
+    assert.deepEqual([...routes.keys()], ['/plugins/qoder-link/status', '/plugins/qoder-link/config', '/plugins/qoder-link/models'])
     const first = await fetch(base + '/plugins/qoder-link/status')
     assert.equal(first.status, 200)
     assert.equal(first.headers.get('cache-control'), 'no-store')
     assert.equal(first.headers.get('x-content-type-options'), 'nosniff')
-    assert.deepEqual(Object.keys(await first.json()).sort(), ['config', 'runs'])
+    assert.deepEqual(Object.keys(await first.json()).sort(), ['catalogModels', 'config', 'modelMessage', 'runs'])
     const saved = await fetch(base + '/plugins/qoder-link/config', post({cliVariant: 'qoderclicn', qodercliBin: 'C:\\Global\\qodercli.exe', qoderclicnBin: 'C:\\China\\qoderclicn.exe', models: ['default', 'model-a'], defaultModel: 'model-a', reasoningEffort: 'high'}))
     assert.equal(saved.status, 200)
     assert.equal((await saved.json()).config.cliVariant, 'qoderclicn')
@@ -85,14 +83,13 @@ test('public runs retain stable top five ties from large unsorted inputs without
   assert.doesNotMatch(source.slice(source.indexOf('function publicRuns')), /\.sort\(/)
 })
 
-test('recovery status is safe, writes remain blocked, account errors use only fixed diagnostics', async () => {
+test('recovery status is safe, writes remain blocked, obsolete account files are ignored', async () => {
   const dir=mkdtempSync(join(tmpdir(),'qoder-recovery-web-')),routes=new Map<string,Handler>()
   const path=join(dir,'settings.json'), accountPath=join(dir,'accounts.json')
   writeFileSync(path,'{"SECRET": invalid')
   const settings=new SettingsStore({},path)
-  const accounts=new AccountService(new AccountStore(accountPath),settings.config)
-  let notifications=0
-  const dispose=registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}},settings,()=>{notifications++},()=>[],accounts)
+  let notifications=0, discoveries=0
+  const dispose=registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}},settings,()=>{notifications++},()=>[],async()=>{discoveries++;return {models:[],message:'SECRET'}})
   const server=createServer((req,res)=>routes.get(req.url!)!(req,res))
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const address=server.address();assert.ok(address && typeof address==='object')
   const base=`http://127.0.0.1:${address.port}/plugins/qoder-link`
@@ -103,13 +100,74 @@ test('recovery status is safe, writes remain blocked, account errors use only fi
     assert.doesNotMatch(JSON.stringify(body),/SECRET/)
     assert.equal((await fetch(base+'/config',post({enabled:true,askTool:true}))).status,400)
     assert.equal(notifications,0);assert.equal(readFileSync(path,'utf8'),'{"SECRET": invalid')
+    assert.equal((await fetch(base+'/models',post({}))).status,503)
+    assert.equal(discoveries,0)
     writeFileSync(accountPath,'SECRET invalid account JSON')
-    const broken=await fetch(base+'/status');assert.equal(broken.status,500)
-    assert.deepEqual(await broken.json(),{error:'Cannot access Qoder account store; repair the store before continuing'})
-    accounts.snapshot=()=>{throw new Error('SECRET raw filesystem error C:\\private')}
-    assert.deepEqual(await (await fetch(base+'/status')).json(),{error:'状态读取失败，请重试。'})
+    const broken=await fetch(base+'/status');assert.equal(broken.status,200)
+    assert.doesNotMatch(await broken.text(),/SECRET|accounts/)
     assert.equal(readFileSync(accountPath,'utf8'),'SECRET invalid account JSON')
   } finally {dispose();await new Promise<void>(resolve=>{server.close(()=>resolve());server.closeAllConnections()});rmSync(dir,{recursive:true,force:true})}
+})
+
+test('explicit model refresh is passive on GET, sanitized, JSON-only and never changes settings',async()=>{
+  let calls=0
+  await fixture(async({base,store})=>{
+    const root=base+'/plugins/qoder-link'
+    for(let i=0;i<2;i++) assert.equal((await fetch(root+'/status')).status,200)
+    assert.equal(calls,0)
+    assert.equal((await fetch(root+'/models')).status,405)
+    assert.equal((await fetch(root+'/models',post({},{Origin:'https://evil.test'}))).status,403)
+    assert.equal((await fetch(root+'/models',{method:'POST',body:'{}'})).status,415)
+    assert.equal((await fetch(root+'/models',post({token:'SECRET'}))).status,400)
+    const response=await fetch(root+'/models',post({}));assert.equal(response.status,200)
+    const body=await response.json()
+    assert.deepEqual(body.catalogModels,[{id:'model-a',name:'Model A'}]);assert.equal(body.modelMessage,'已获取当前 CLI 模型列表。')
+    assert.doesNotMatch(JSON.stringify(body),/SECRET/)
+    assert.deepEqual(store.config.models,['default']);assert.equal(store.config.cliVariant,'qodercli');assert.equal(calls,1)
+    await fetch(root+'/config',post({qodercliBin:'new-cli'}))
+    const next=await (await fetch(root+'/status')).json();assert.deepEqual(next.catalogModels,[]);assert.equal(next.modelMessage,'模型列表尚未加载。')
+  },[],async config=>{calls++;config.models.push('do-not-save');return {models:[{id:'model-a',name:'Model A',token:'SECRET'},{id:'../bad',name:'SECRET'}],message:'SECRET arbitrary CLI diagnostic'}})
+})
+
+test('model refresh rejects stale region/path results including change-back and dispose',async()=>{
+  for(const change of [{cliVariant:'qoderclicn'}, {qodercliBin:'another-cli'}]) {
+    let finish!:(value:{models:{id:string;name:string}[];message:string})=>void,started!:()=>void
+    const ready=new Promise<void>(resolve=>{started=resolve})
+    await fixture(async({base})=>{
+      const root=base+'/plugins/qoder-link',pending=fetch(root+'/models',post({}));await ready
+      await fetch(root+'/config',post(change));await fetch(root+'/config',post({cliVariant:'qodercli',qodercliBin:'qodercli'}))
+      finish({models:[{id:'stale',name:'Stale'}],message:'Stale'})
+      assert.equal((await pending).status,409)
+      assert.deepEqual((await (await fetch(root+'/status')).json()).catalogModels,[])
+    },[],()=>{started();return new Promise(resolve=>{finish=resolve})})
+  }
+  let finish!:(value:{models:{id:string;name:string}[];message:string})=>void,started!:()=>void
+  const ready=new Promise<void>(resolve=>{started=resolve})
+  await fixture(async({base,dispose})=>{
+    const pending=fetch(base+'/plugins/qoder-link/models',post({}));await ready;dispose();finish({models:[],message:'late'})
+    assert.equal((await pending).status,503)
+  },[],()=>{started();return new Promise(resolve=>{finish=resolve})})
+})
+
+test('model discovery has one process slot across same and changed configuration epochs',async()=>{
+  let calls=0,started!:()=>void,finish!:(value:{models:{id:string;name:string}[];message:string})=>void
+  const ready=new Promise<void>(resolve=>{started=resolve})
+  await fixture(async({base})=>{
+    const root=base+'/plugins/qoder-link',first=fetch(root+'/models',post({}));await ready
+    const same=await Promise.all(Array.from({length:8},()=>fetch(root+'/models',post({}))))
+    assert.ok(same.every(response=>response.status===409));assert.equal(calls,1)
+    await fetch(root+'/config',post({cliVariant:'qoderclicn'}))
+    assert.equal((await fetch(root+'/models',post({}))).status,409);assert.equal(calls,1)
+    finish({models:[],message:'SECRET'});assert.equal((await first).status,409)
+    const next=await fetch(root+'/models',post({}));assert.equal(next.status,200);assert.equal(calls,2)
+  },[],()=>{calls++;if(calls>1)return Promise.resolve({models:[],message:'SECRET'});started();return new Promise(resolve=>{finish=resolve})})
+})
+
+test('model discovery exceptions do not expose credentials or paths',async()=>{
+  await fixture(async({base})=>{
+    const response=await fetch(base+'/plugins/qoder-link/models',post({}));assert.equal(response.status,400)
+    assert.doesNotMatch(await response.text(),/SECRET/)
+  },[],async()=>{throw new Error('SECRET PAT C:/private')})
 })
 
 test('all existing advanced panel fields remain editable', async () => {
@@ -118,29 +176,4 @@ test('all existing advanced panel fields remain editable', async () => {
     assert.equal((await fetch(base+'/plugins/qoder-link/config',post(patch))).status,200)
     assert.deepEqual(store.config,patch)
   })
-})
-
-test('account routes enforce origin and JSON, reject cross-region writes, never disclose PAT',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'qoder-account-web-')),routes=new Map<string,Handler>()
-  const settings=new SettingsStore({},join(dir,'settings.json')),accounts=new AccountService(new AccountStore(join(dir,'accounts.json')),settings.config)
-  const dispose=registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}},settings,()=>{},()=>[],accounts)
-  const server=createServer((req,res)=>{const handler=routes.get(req.url||'');if(handler)handler(req,res);else{res.writeHead(404);res.end()}})
-  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));const address=server.address();assert.ok(address && typeof address==='object')
-  const base=`http://127.0.0.1:${address.port}/plugins/qoder-link`
-  try{
-    const input={cliVariant:'qodercli',name:'Test',token:'SECRET-PAT'}
-    assert.equal((await fetch(base+'/accounts/add',post(input,{Origin:'https://evil.test'}))).status,403)
-    assert.equal((await fetch(base+'/accounts/add',{method:'POST',body:JSON.stringify(input)})).status,415)
-    assert.equal((await fetch(base+'/accounts/add',post({...input,cliVariant:'qoderclicn'}))).status,400)
-    const added=await fetch(base+'/accounts/add',post(input));assert.equal(added.status,200)
-    const text=await added.text();assert.doesNotMatch(text,/SECRET|token/);const snapshot=JSON.parse(text)
-    const id=snapshot.accounts[0].id
-    assert.equal(snapshot.managed,true);assert.equal(snapshot.selectedAccountId,id)
-    assert.equal((await fetch(base+'/accounts/update',post({id,token:'SECRET\nINVALID'}))).status,400)
-    const status=await (await fetch(base+'/status')).text();assert.doesNotMatch(status,/SECRET|token/)
-    await fetch(base+'/accounts/remove',post({id}))
-    const empty=await (await fetch(base+'/accounts')).json();assert.equal(empty.managed,true);assert.deepEqual(empty.accounts,[])
-    await assert.rejects(accounts.acquire({prompt:'test',cwd:dir}))
-    const oversized=await fetch(base+'/accounts/add',post({...input,token:'SECRET'.repeat(6000)}));assert.equal(oversized.status,400);assert.doesNotMatch(await oversized.text(),/SECRET/)
-  }finally{dispose();await new Promise<void>(resolve=>{server.close(()=>resolve());server.closeAllConnections()});rmSync(dir,{recursive:true,force:true})}
 })

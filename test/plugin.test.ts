@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-test('plugin wires ACP account routes, live adapter and inactivity-aware delegation', () => {
+test('plugin wires passive status and model discovery routes, live adapter and inactivity-aware delegation', () => {
   const providers: unknown[] = []
   const tools: Array<{ name: string; timeoutMs?: number }> = []
   const commands: Array<{ handler: (input: {rawInput: string}) => {kind: string; text: string} }> = []
@@ -25,7 +25,12 @@ test('plugin wires ACP account routes, live adapter and inactivity-aware delegat
   const home = mkdtempSync(join(tmpdir(), 'qoder-plugin-'))
   process.env.DSH_HOME = home
   try {
+    const oldAccounts = join(home, 'plugins', 'dsh-qoder-link', 'accounts.json')
+    mkdirSync(join(home, 'plugins', 'dsh-qoder-link'), {recursive:true})
+    writeFileSync(oldAccounts, 'SECRET broken old account file')
     apply(context as unknown as Context, {enabled: true, askTool: true})
+    assert.equal(readFileSync(oldAccounts,'utf8'),'SECRET broken old account file')
+    assert.equal(routes.some(route => route.path.includes('/accounts')),false)
     assert.equal(providers.length, 1)
     assert.equal(tools.length, 1)
     assert.equal(tools[0]!.name, 'qoder_ask')
@@ -36,7 +41,7 @@ test('plugin wires ACP account routes, live adapter and inactivity-aware delegat
     assert.match(status.text, /inactivity timeout/)
     assert.match(commands[0]!.handler({rawInput: 'models'}).text, /qoder\/default/)
     assert.equal(commands[0]!.handler({rawInput: 'invalid'}).kind, 'error')
-    for (const action of ['accounts', 'accounts/add', 'accounts/update', 'accounts/remove', 'accounts/config']) {
+    for (const action of ['status', 'config', 'models']) {
       assert.ok(routes.some(route => route.path === `/plugins/qoder-link/${action}`), `missing ${action}`)
     }
     apply(context as unknown as Context, {enabled: false})

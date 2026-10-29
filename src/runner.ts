@@ -19,8 +19,6 @@ export interface QoderRequest {
   bin?: string;
   /** Inactivity budget, renewed only by validated ACP progress. */
   timeoutMs?: number;
-  /** PAT for this process only; never passed on argv or persisted. */
-  authToken?: string;
   cliVariant?: 'qodercli' | 'qoderclicn';
   signal?: AbortSignal;
 }
@@ -72,14 +70,11 @@ export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Pr
  * timeout. ELECTRON_RUN_AS_NODE makes an Electron binary behave as plain Node;
  * a real Node executable simply ignores the variable.
  */
-export function childEnv(authToken?: string, cliVariant: 'qodercli' | 'qoderclicn' = 'qodercli'): NodeJS.ProcessEnv {
+export function childEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
-  // Never inherit shell identity, even without a managed account: the CLI may
-  // use its own disk login instead. Windows environment names ignore casing.
+  // Both regions use the CLI's own disk login, never inherited shell PATs.
+  // Preserve home/config paths; Windows environment names ignore casing.
   for (const key of Object.keys(env)) if (['QODER_PERSONAL_ACCESS_TOKEN', 'QODERCN_PERSONAL_ACCESS_TOKEN'].includes(key.toUpperCase())) delete env[key];
-  if (authToken !== undefined) {
-    env[cliVariant === 'qoderclicn' ? 'QODERCN_PERSONAL_ACCESS_TOKEN' : 'QODER_PERSONAL_ACCESS_TOKEN'] = authToken;
-  }
   return env;
 }
 
