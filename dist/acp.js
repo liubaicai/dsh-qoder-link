@@ -13,6 +13,33 @@ const DEFAULT_TIMEOUT = 10 * 60 * 1000;
 const CANCEL_GRACE_MS = 200;
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+/** Resolve CLI display aliases against this session, never a hard-coded model map. */
+function resolveSessionModel(requested, models) {
+    // Older ACP servers omit the catalog; preserve direct-ID negotiation there.
+    if (!owns(models, 'availableModels'))
+        return requested;
+    if (!Array.isArray(models.availableModels))
+        throw protocolError();
+    const catalog = models.availableModels.map(value => {
+        if (!object(value) || !isModelIdentifier(value.modelId) || typeof value.name !== 'string')
+            throw protocolError();
+        return { id: value.modelId, name: value.name };
+    });
+    const exactId = catalog.find(model => model.id === requested);
+    if (exactId)
+        return exactId.id;
+    const byName = catalog.filter(model => model.name === requested);
+    if (byName.length > 1)
+        throw new Error('Qoder ACP model name is ambiguous');
+    if (byName.length === 1)
+        return byName[0].id;
+    const byFoldedId = catalog.filter(model => model.id.toLowerCase() === requested.toLowerCase());
+    if (byFoldedId.length > 1)
+        throw new Error('Qoder ACP model identifier is ambiguous');
+    if (byFoldedId.length === 1)
+        return byFoldedId[0].id;
+    throw new Error('Qoder ACP requested model is unavailable in the session catalog');
+}
 /**
  * Native tools remain entirely inside Qoder. ACP notifications are display
  * events, never tool requests to execute or replay in the host. Each invocation
@@ -370,7 +397,7 @@ export async function* runQoderAcp(request) {
         onAbort();
     const driver = (async () => {
         try {
-            const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.3' } });
+            const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.4' } });
             if (!object(init) || init.protocolVersion !== 1 || !object(init.agentCapabilities))
                 throw protocolError();
             if (failure)
@@ -380,9 +407,12 @@ export async function* runQoderAcp(request) {
                 throw protocolError();
             sessionId = session.sessionId;
             const models = object(session.models) ? session.models : {};
-            if (request.model && models.currentModelId !== request.model) {
-                await rpc('session/set_model', { sessionId, modelId: request.model });
-                models.currentModelId = request.model;
+            if (request.model) {
+                const modelId = resolveSessionModel(request.model, models);
+                if (models.currentModelId !== modelId) {
+                    await rpc('session/set_model', { sessionId, modelId });
+                    models.currentModelId = modelId;
+                }
             }
             if (isModelIdentifier(models.currentModelId))
                 push({ type: 'metadata', model: models.currentModelId });

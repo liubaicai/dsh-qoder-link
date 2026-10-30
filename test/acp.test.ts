@@ -120,10 +120,59 @@ test('invalid session IDs, frames, unmatched responses and non-end-turn stops fa
   const f = await setup(t);
   for (const prompt of ['wrong-session', 'oversized', 'unexpected-id', 'refusal']) await assert.rejects(collect({ ...f, prompt }));
 });
-test('requested model is selected through ACP when session differs', async t => {
-  const f = await setup(t);
-  const events = await collect({ ...f, prompt: 'model', model: 'qfmodel' });
-  assert.deepEqual(events[0], { type: 'metadata', model: 'qfmodel' });
+test('model catalog aliases resolve to canonical IDs before switching or prompting', async t => {
+  const availableModels = [
+    { modelId: 'qfmodel', name: 'Qwen3.8-Flash' },
+    { modelId: 'auto', name: 'Auto (default)' },
+    { modelId: 'fast', name: 'Fast (default)' },
+    { modelId: 'dynamic-id', name: 'Future-Model' },
+    { modelId: 'shadow-id', name: 'qfmodel' },
+  ];
+  const cases = [
+    { requested: 'Qwen3.8-Flash', current: 'qfmodel', target: 'qfmodel', switchModel: false },
+    { requested: 'Qwen3.8-Flash', current: 'auto', target: 'qfmodel', switchModel: true },
+    { requested: 'qfmodel', current: 'auto', target: 'qfmodel', switchModel: true },
+    { requested: 'Auto', current: 'auto', target: 'auto', switchModel: false },
+    { requested: 'Fast', current: 'auto', target: 'fast', switchModel: true },
+    { requested: 'Future-Model', current: 'auto', target: 'dynamic-id', switchModel: true },
+  ];
+  for (const entry of cases) {
+    const f = await setup(t);
+    await writeFile(join(f.cwd, 'setup.json'), JSON.stringify({ models: { currentModelId: entry.current, availableModels } }));
+    const events = await collect({ ...f, prompt: 'model', model: entry.requested });
+    assert.deepEqual(events[0], { type: 'metadata', model: entry.target });
+    const wire = (await readFile(join(f.cwd, 'wire.ndjson'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(wire[0].params.clientInfo.version, '0.1.4');
+    const switches = wire.filter(row => row.method === 'session/set_model');
+    assert.deepEqual(switches.map(row => row.params.modelId), entry.switchModel ? [entry.target] : []);
+    assert.equal(wire.some(row => row.method === 'session/prompt'), true);
+  }
+});
+test('ambiguous or unknown catalog names fail safely before prompt without fallback', async t => {
+  const cases = [
+    { requested: 'SECRET_TOKEN', models: { currentModelId: 'a', availableModels: [{ modelId: 'a', name: 'SECRET_TOKEN' }, { modelId: 'b', name: 'SECRET_TOKEN' }] } },
+    { requested: 'SECRET_TOKEN', models: { currentModelId: 'SECRET_TOKEN', availableModels: [{ modelId: 'a', name: 'Other' }] } },
+    { requested: 'missing', models: { currentModelId: 'a', availableModels: [] } },
+    { requested: 'AUTO', models: { currentModelId: 'auto', availableModels: [{ modelId: 'auto', name: 'First' }, { modelId: 'Auto', name: 'Second' }] } },
+  ];
+  for (const entry of cases) {
+    const f = await setup(t);
+    await writeFile(join(f.cwd, 'setup.json'), JSON.stringify({ models: entry.models }));
+    await assert.rejects(collect({ ...f, prompt: 'model', model: entry.requested }), (error: unknown) => error instanceof Error && /ambiguous|unavailable/.test(error.message) && !error.message.includes('SECRET_TOKEN'));
+    const wire = await readFile(join(f.cwd, 'wire.ndjson'), 'utf8');
+    assert.equal(wire.includes('session/prompt'), false);
+    assert.equal(wire.includes('session/set_model'), false);
+  }
+});
+test('absent model catalog preserves direct-ID compatibility', async t => {
+  for (const models of [undefined, { currentModelId: 'other' }, { currentModelId: 'qfmodel' }]) {
+    const f = await setup(t);
+    await writeFile(join(f.cwd, 'setup.json'), JSON.stringify({ models }));
+    const events = await collect({ ...f, prompt: 'model', model: 'qfmodel' });
+    assert.deepEqual(events[0], { type: 'metadata', model: 'qfmodel' });
+    const wire = (await readFile(join(f.cwd, 'wire.ndjson'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(wire.filter(row => row.method === 'session/set_model').map(row => row.params.modelId), models?.currentModelId === 'qfmodel' ? [] : ['qfmodel']);
+  }
 });
 test('standard auth error is named and diagnostics are secret-safe', async t => {
   const f = await setup(t);

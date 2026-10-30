@@ -50,13 +50,13 @@ qoderclicn --list-models
 推荐直接使用 Release 安装包地址，固定到已发布版本：
 
 ```sh
-dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.3/dsh-qoder-link-0.1.3.tgz"
+dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.4/dsh-qoder-link-0.1.4.tgz"
 ```
 
 也可以从 GitHub 仓库的指定标签安装：
 
 ```sh
-dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.3"
+dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.4"
 ```
 
 `web` 是 DSH 配置名称；如果使用其他 profile，请替换成对应名称。安装后按提示重载插件或重启 DSH，刷新网页，在 **设置 → Qoder Link** 中选择国际版或中国版，并在终端完成对应 CLI 的登录。
@@ -64,13 +64,13 @@ dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.3"
 ### 从本地安装包安装
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.3.tgz
+dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.4.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.3.tgz
+dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.4.tgz
 ```
 
 也可在支持本地插件包的 DSH 插件管理界面选择 `.tgz`。按 DSH 提示重载插件或重启，刷新 Web 页面。

@@ -19,17 +19,22 @@ for await (const line of createInterface({ input: process.stdin })) {
     reply(row.id, { protocolVersion: 1, agentCapabilities: {} });
   } else if (row.method === 'session/new') {
     if (row.params.mcpServers.length) process.exit(3);
+    const session = { sessionId: 'test-session', ...(setup && Object.hasOwn(setup, 'models') ? { models: setup.models } : {}) };
     if (setup?.phase === 'before') {
       const frames = metadataFrames();
       if (setup.stall) { emitFrames(frames); setInterval(() => emitFrames(frames), 50); continue; }
-      const response = { jsonrpc: '2.0', id: row.id, result: { sessionId: 'test-session' } };
+      const response = { jsonrpc: '2.0', id: row.id, result: session };
       if (setup.split) { emitFrames(frames); await pause(30); reply(row.id, response.result); }
       else emitFrames([...frames, response]);
     } else {
       update({ sessionUpdate: 'available_commands_update', availableCommands: [] });
-      reply(row.id, { sessionId: 'test-session' });
+      reply(row.id, session);
     }
-  } else if (row.method === 'session/set_model') reply(row.id, {});
+  } else if (row.method === 'session/set_model') {
+    if (Array.isArray(setup?.models?.availableModels) && !setup.models.availableModels.some(model => model.modelId === row.params.modelId)) {
+      send({ id: row.id, error: { code: -32602, message: 'SECRET_TOKEN invalid model' } });
+    } else reply(row.id, {});
+  }
   else if (row.method === 'session/cancel') {
     writeFileSync('cancelled', 'yes');
     if (mode.startsWith('exit-tree:')) process.exit(0);
