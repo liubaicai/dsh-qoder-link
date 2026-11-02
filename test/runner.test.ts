@@ -158,6 +158,37 @@ test('npm shims reject non-Node targets and directories', async t => {
   assert.deepEqual(await resolveQoderBin(shim, f.cwd), { command: process.execPath, args: [await realpath(target)] });
 });
 
+test('CLI discovery handles stale PATH, keeps regions separate and respects explicit paths', async t => {
+  const f = await fixture(t);
+  const home = join(f.cwd, 'home'), pathDir = join(f.cwd, 'path'), appData = join(home, 'AppData', 'Roaming');
+  const env = { HOME: home, USERPROFILE: home, APPDATA: appData, [process.platform === 'win32' ? 'Path' : 'PATH']: '' };
+  const suffix = process.platform === 'win32' ? '.exe' : '';
+  const createExecutable = async (path: string) => {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, 'fixture', { mode: 0o755 });
+    return realpath(path);
+  };
+  const international = await createExecutable(join(home, '.qoder', 'bin', 'qodercli', 'qodercli' + suffix));
+  assert.deepEqual(await resolveQoderBin('qodercli', f.cwd, env), { command: international, args: [] });
+  await assert.rejects(resolveQoderBin('qoderclicn', f.cwd, env), error => error instanceof Error
+    && error.message.includes('(qoderclicn)') && !error.message.includes('(qodercli)'));
+  const china = await createExecutable(join(home, '.qoder-cn', 'bin', 'qoderclicn', 'qoderclicn' + suffix));
+  assert.deepEqual(await resolveQoderBin('qoderclicn', f.cwd, env), { command: china, args: [] });
+  const preferred = await createExecutable(join(pathDir, 'qoderclicn' + suffix));
+  assert.deepEqual(await resolveQoderBin('qoderclicn', f.cwd, { ...env, [process.platform === 'win32' ? 'Path' : 'PATH']: pathDir }), { command: preferred, args: [] });
+  await assert.rejects(resolveQoderBin(join(f.cwd, 'missing', 'qoderclicn'), f.cwd, env), /configured path or command/);
+  await assert.rejects(resolveQoderBin('custom-cli', f.cwd, env), /configured path or command/);
+});
+
+test('Windows global npm installs resolve even when npm is missing from host PATH', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t), appData = join(f.cwd, 'AppData');
+  const target = join(appData, 'npm', 'node_modules', '@qodercn-ai', 'qoderclicn', 'cli.js');
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, '// fake');
+  await writeFile(join(appData, 'npm', 'qoderclicn.cmd'), '@ECHO off\r\n"%dp0%\\node_modules\\@qodercn-ai\\qoderclicn\\cli.js" %*\r\n');
+  assert.deepEqual(await resolveQoderBin('qoderclicn', f.cwd, { USERPROFILE: f.cwd, APPDATA: appData, PATH: '' }), { command: process.execPath, args: [await realpath(target)] });
+});
+
 test('childEnv always removes both regional PAT casing variants without changing the host', () => {
   const original = process.env;
   // A plain object also exercises simultaneous casing variants on Windows.

@@ -50,13 +50,13 @@ qoderclicn --list-models
 推荐直接使用 Release 安装包地址，固定到已发布版本：
 
 ```sh
-dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.4/dsh-qoder-link-0.1.4.tgz"
+dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.5/dsh-qoder-link-0.1.5.tgz"
 ```
 
 也可以从 GitHub 仓库的指定标签安装：
 
 ```sh
-dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.4"
+dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.5"
 ```
 
 `web` 是 DSH 配置名称；如果使用其他 profile，请替换成对应名称。安装后按提示重载插件或重启 DSH，刷新网页，在 **设置 → Qoder Link** 中选择国际版或中国版，并在终端完成对应 CLI 的登录。
@@ -64,13 +64,13 @@ dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.4"
 ### 从本地安装包安装
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.4.tgz
+dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.5.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.4.tgz
+dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.5.tgz
 ```
 
 也可在支持本地插件包的 DSH 插件管理界面选择 `.tgz`。按 DSH 提示重载插件或重启，刷新 Web 页面。
@@ -80,7 +80,7 @@ dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.4.
 打开 **设置 → Qoder Link**（也可从插件行的配置入口打开）：
 
 1. 选择 `qodercli` 国际版或 `qoderclicn` 中国版。
-2. 通常无需填写路径；自定义安装位置可在高级设置中填写对应 CLI 路径。留空时从 PATH 查找，路径不是带参数的整条命令。
+2. 通常无需填写路径；留空时优先从 DSH 进程的 PATH 查找，再检查所选区域的官方用户安装目录；Windows 同时检查用户全局 npm 目录。即使 DSH 尚未继承安装后的新 PATH，也能发现默认位置的 CLI。自定义安装位置可在高级设置中填写完整路径，路径不是带参数的整条命令，不会跨区域回退。
 3. 在终端完成对应 CLI 登录，页面不提供账户管理或 PAT 输入。
 4. 页面自动获取模型候选，也可点击“获取模型列表”。点击模型按钮启用，选择默认模型后保存；`default` 使用 CLI 自身默认值。区域或路径变更需先保存，再获取对应目录；刷新不会覆盖未保存的模型选择。
 5. 保存，在 DSH 模型选择器中选择 `qoder/default` 或启用的具体模型。模型候选不保证当前额度或所有模型的调用权限。

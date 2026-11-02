@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { access, readFile, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { homedir } from 'node:os';
 import { delimiter, dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { runQoderAcp } from './acp.ts';
 import type { BridgeEvent } from './protocol.ts';
@@ -24,11 +25,24 @@ export interface QoderRequest {
 }
 
 
-/** Resolve npm's Windows launchers without ever invoking cmd.exe or PowerShell. */
-export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Promise<{ command: string; args: string[] }> {
+/** Resolve PATH and official per-user installs without invoking a shell or crossing regions. */
+export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): Promise<{ command: string; args: string[] }> {
+  const explicitPath = isAbsolute(bin) || /[\\/]/.test(bin);
+  const cli = /^(qodercli|qoderclicn)(?:\.exe)?$/i.exec(bin)?.[1]?.toLowerCase();
   let candidates: string[];
-  if (isAbsolute(bin) || /[\\/]/.test(bin)) candidates = [resolve(cwd, bin)];
-  else candidates = (process.env.PATH ?? '').split(delimiter).filter(Boolean).map(path => join(path.replace(/^"|"$/g, ''), bin));
+  if (explicitPath) candidates = [resolve(cwd, bin)];
+  else {
+    // Electron can retain a PATH from before the CLI was installed. Keep PATH
+    // precedence, then inspect only known locations for the requested region.
+    const path = Object.entries(env).find(([key]) => process.platform === 'win32' ? key.toUpperCase() === 'PATH' : key === 'PATH')?.[1] ?? '';
+    candidates = path.split(delimiter).filter(Boolean).map(path => join(path.replace(/^"|"$/g, ''), bin));
+    if (cli) {
+      const home = (process.platform === 'win32' ? env.USERPROFILE : env.HOME) || homedir();
+      candidates.push(join(home, cli === 'qoderclicn' ? '.qoder-cn' : '.qoder', 'bin', cli, cli + (process.platform === 'win32' ? '.exe' : '')));
+      if (process.platform === 'win32') candidates.push(join(env.APPDATA || join(home, 'AppData', 'Roaming'), 'npm', cli));
+      else candidates.push(join(home, '.local', 'bin', cli));
+    }
+  }
   const extensions = process.platform === 'win32' ? ['', '.cmd', '.exe', '.ps1', '.bat'] : [''];
   for (const candidate of candidates) {
     for (const extension of extname(candidate) ? [''] : extensions) {
@@ -59,7 +73,9 @@ export async function resolveQoderBin(bin = 'qodercli', cwd = process.cwd()): Pr
       return { command: resolved, args: [] };
     }
   }
-  throw new Error('Qoder executable not found; install qodercli or configure bin');
+  throw new Error(cli && !explicitPath
+    ? `Qoder executable not found (${cli}); check that CLI's installation or configure its full path in Qoder Link settings`
+    : 'Qoder executable not found at the configured path or command; check the selected region and CLI path in Qoder Link settings');
 }
 
 

@@ -17,8 +17,8 @@ export interface QoderRequest {
     cliVariant?: 'qodercli' | 'qoderclicn';
     signal?: AbortSignal;
 }
-/** Resolve npm's Windows launchers without ever invoking cmd.exe or PowerShell. */
-export declare function resolveQoderBin(bin?: string, cwd?: string): Promise<{
+/** Resolve PATH and official per-user installs without invoking a shell or crossing regions. */
+export declare function resolveQoderBin(bin?: string, cwd?: string, env?: NodeJS.ProcessEnv): Promise<{
     command: string;
     args: string[];
 }>;
