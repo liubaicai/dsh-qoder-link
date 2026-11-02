@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { QoderAdapter, type Runner } from '../src/adapter.ts'
 import { resolveConfig } from '../src/config.ts'
-import { parseResponse, ToolResponseFormatError } from '../src/response.ts'
+import { parseResponse, ToolResponseFormatError, ToolCallLimitError, MAX_TOOL_CALLS } from '../src/response.ts'
+import { TOOL_RESPONSE_INSTRUCTION, RESPONSE_SCHEMA } from '../src/prompt.ts'
 import type { StreamChunk, GenerateOptions } from '@deepseek-ai/dsh-llm'
 
 const tools = [{name:'read',description:'read file',parameters:{}}]
@@ -82,6 +83,50 @@ test('JSON syntax failures regenerate once without repairing or emitting the fai
   assert.equal(out.filter(c=>c.type==='tool-call-delta'||c.type==='text-delta').length,0)
   const finish=out.at(-1)
   assert.equal(finish?.type==='finish'&&finish.reason.kind,'error')
+})
+
+test('tool batch limit is shared by prompt/schema and regenerates overflow without partial calls', async () => {
+  assert.ok(TOOL_RESPONSE_INSTRUCTION.includes(`at most ${MAX_TOOL_CALLS} tool calls`))
+  assert.ok(TOOL_RESPONSE_INSTRUCTION.includes('at most 8 independent calls'))
+  const schema = RESPONSE_SCHEMA.properties as Record<string, {maxItems?:number}>
+  assert.equal(schema.toolCalls!.maxItems,MAX_TOOL_CALLS)
+  const batch=(count:number)=>({text:'rejected batch text',toolCalls:Array.from({length:count},(_,i)=>({name:'read',arguments:{file_path:`C:/example/file-${i}.ts`}}))})
+  const boundary=batch(MAX_TOOL_CALLS), oversized=batch(MAX_TOOL_CALLS+1)
+  assert.equal(parseResponse(boundary,tools).toolCalls.length,MAX_TOOL_CALLS)
+  assert.throws(()=>parseResponse(oversized,tools),ToolCallLimitError)
+  // The aggregate limit also applies to adjacent response documents.
+  const segmented=JSON.stringify(batch(16))+'\n'+JSON.stringify(batch(17))
+  for (const first of [oversized,JSON.stringify(oversized),segmented]) {
+    let requests=0
+    const out=await collect(async function*(request){
+      requests++
+      if(requests===1) {
+        if(typeof first==='string') {
+          for(let i=0;i<first.length;i+=17) yield {type:'text',delta:first.slice(i,i+17)}
+          yield {type:'result',text:first}
+        } else yield {type:'result',text:'',structuredOutput:first}
+      } else {
+        assert.ok(request.prompt.includes('entire batch was rejected, not executed'))
+        assert.ok(request.prompt.includes('Return only ONE next necessary call'))
+        yield {type:'result',text:canonical}
+      }
+    })
+    assert.equal(requests,2)
+    assert.deepEqual(out.filter(c=>c.type==='tool-call-delta').map(c=>JSON.parse(c.argumentsDelta)),[call.arguments])
+    assert.deepEqual(out.filter(c=>c.type==='text-delta').map(c=>c.text),['checking'])
+    const finish=out.at(-1)
+    assert.equal(finish?.type==='finish'&&finish.reason.kind,'tool-calls')
+  }
+  let requests=0
+  const failed=await collect(async function*(){requests++;yield {type:'result',text:JSON.stringify(oversized)}})
+  assert.equal(requests,2)
+  assert.equal(failed.filter(c=>c.type==='text-delta'||c.type==='tool-call-delta'||c.type==='block-start').length,0)
+  const finish=failed.at(-1)
+  assert.equal(finish?.type==='finish'&&finish.reason.kind,'error')
+  requests=0
+  const accepted=await collect(async function*(){requests++;yield {type:'result',text:JSON.stringify(boundary)}})
+  assert.equal(requests,1)
+  assert.equal(accepted.filter(c=>c.type==='tool-call-delta').length,MAX_TOOL_CALLS)
 })
 
 test('format retry is bounded and never executes examples, invalid or mixed responses', async () => {

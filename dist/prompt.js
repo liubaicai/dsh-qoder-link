@@ -1,5 +1,7 @@
+import { MAX_TOOL_CALLS } from "./response.js";
 export { parseResponse } from "./response.js";
-export const TOOL_RESPONSE_INSTRUCTION = 'DSH owns tool execution. Do NOT execute local Qoder tools. Return ONLY one JSON object with exactly text (string) and toolCalls (array). Each call has name and arguments; use a JSON object for arguments, not a JSON-encoded string. Put all commentary in text. Do not output XML tags, <tool_call>, markdown fences, or prose outside the object. Use only the supplied DSH tool names and schemas. Return toolCalls:[] when no tool is needed. Never omit required arguments or invent tools.';
+export const TOOL_RESPONSE_INSTRUCTION = 'DSH owns tool execution. Do NOT execute local Qoder tools. Return ONLY one JSON object with exactly text (string) and toolCalls (array). Each call has name and arguments; use a JSON object for arguments, not a JSON-encoded string. Put all commentary in text. Do not output XML tags, <tool_call>, markdown fences, or prose outside the object. Use only the supplied DSH tool names and schemas. Return toolCalls:[] when no tool is needed. Never omit required arguments or invent tools.'
+    + ` Return at most ${MAX_TOOL_CALLS} tool calls in the entire response; prefer small batches of at most 8 independent calls. If more work remains, request only the next batch, wait for its actual tool results, then continue. Use prior tool results and avoid rereading unchanged files; do not bundle the whole review into one oversized response.`;
 function project(block) {
     switch (block.type) {
         case 'text': return { type: 'text', text: block.text };
@@ -26,7 +28,7 @@ export const RESPONSE_SCHEMA = {
     type: 'object', additionalProperties: false, required: ['text', 'toolCalls'],
     properties: {
         text: { type: 'string' },
-        toolCalls: { type: 'array', maxItems: 32, items: {
+        toolCalls: { type: 'array', maxItems: MAX_TOOL_CALLS, items: {
                 type: 'object', additionalProperties: false, required: ['name', 'arguments'],
                 properties: { name: { type: 'string' }, arguments: { type: 'object' } },
             } },

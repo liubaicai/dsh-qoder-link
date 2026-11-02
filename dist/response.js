@@ -6,7 +6,11 @@ export class ToolResponseFormatError extends Error {
 }
 const MAX_DEPTH = 32;
 const MAX_DOCUMENTS = 64;
-const MAX_CALLS = 32;
+export const MAX_TOOL_CALLS = 32;
+/** Oversized responses may be regenerated, but never truncated or partly emitted. */
+export class ToolCallLimitError extends Error {
+    constructor() { super(`Invalid Qoder response envelope: at most ${MAX_TOOL_CALLS} tool calls`); this.name = 'ToolCallLimitError'; }
+}
 const own = (o, key) => Object.hasOwn(o, key);
 const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const fail = (detail) => { throw new Error(`Invalid Qoder response envelope: ${detail}`); };
@@ -203,8 +207,8 @@ class Normalizer {
         catch {
             return fail('tool arguments must be a JSON object');
         }
-        if (this.calls.length >= MAX_CALLS)
-            fail('at most 32 tool calls');
+        if (this.calls.length >= MAX_TOOL_CALLS)
+            throw new ToolCallLimitError();
         this.calls.push({ name: o.name, arguments: encoded });
     }
     callList(value) {

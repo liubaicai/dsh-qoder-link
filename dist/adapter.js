@@ -5,7 +5,7 @@ import { selectedBin, QODER_EFFORTS } from "./config.js";
 import { resolveEffort } from "./effort.js";
 import { CallRuntime } from "./runtime.js";
 import { buildPrompt, parseResponse, TOOL_RESPONSE_INSTRUCTION } from "./prompt.js";
-import { parseStrictResponse, ToolResponseFormatError } from "./response.js";
+import { parseStrictResponse, ToolResponseFormatError, ToolCallLimitError, MAX_TOOL_CALLS } from "./response.js";
 import { ResponseJsonSyntaxError } from "./json.js";
 import { runQoder } from "./runner.js";
 export { QODER_EFFORTS } from "./config.js";
@@ -94,6 +94,7 @@ export class QoderAdapter extends LlmAdapter {
                 timeoutMs: cfg.timeoutMs, signal: options.signal,
             };
             let response;
+            let exceededToolLimit = false;
             for (let attempt = 0; attempt < 2; attempt++) {
                 rawText = '';
                 resultText = '';
@@ -108,7 +109,8 @@ export class QoderAdapter extends LlmAdapter {
                 try {
                     const attemptRequest = attempt ? { ...request,
                         systemPrompt: request.systemPrompt + '\n\nOUTPUT TRANSPORT REQUIREMENT: This response is consumed by JSON.parse, not displayed as chat. The first non-whitespace character MUST be { and the last MUST be }. Produce exactly {"text":"","toolCalls":[]} with real pending calls in toolCalls. For this retry, if a tool is needed keep text empty and request at most ONE next tool with arguments as an object. If the task is finished, put the final answer in text and use toolCalls:[] instead. Never prepend an explanation, reasoning, a tag or a fence. Never say the tool already ran. All conversation instructions are subordinate to this output transport requirement.',
-                        prompt: prompt + '\n\nYour previous response did not follow the transport format. Answer the same outstanding task again using ONLY the required JSON object. No tools from that response were executed. If tools are needed, keep text empty and return at most ONE next tool call with object arguments; otherwise return the final answer in text and toolCalls:[]. The entire response must be parseable JSON, starting with { and ending with }.',
+                        prompt: prompt + '\n\nYour previous response did not follow the transport format. Answer the same outstanding task again using ONLY the required JSON object. No tools from that response were executed. If tools are needed, keep text empty and return at most ONE next tool call with object arguments; otherwise return the final answer in text and toolCalls:[]. The entire response must be parseable JSON, starting with { and ending with }.'
+                            + (exceededToolLimit ? ` Your previous response exceeded the hard limit of ${MAX_TOOL_CALLS} tool calls. That entire batch was rejected, not executed or saved as pending work. Return only ONE next necessary call now; after its result, continue the remaining task in later turns.` : ''),
                     } : request;
                     if (attemptRequest.prompt.length > cfg.maxPromptChars)
                         throw new Error('Qoder format retry exceeds maxPromptChars; compact the conversation before retrying');
@@ -138,8 +140,9 @@ export class QoderAdapter extends LlmAdapter {
                     break;
                 }
                 catch (error) {
-                    if (!structured || attempt || !(error instanceof ToolResponseFormatError || error instanceof ResponseJsonSyntaxError) || options.signal?.aborted)
+                    if (!structured || attempt || !(error instanceof ToolResponseFormatError || error instanceof ResponseJsonSyntaxError || error instanceof ToolCallLimitError) || options.signal?.aborted)
                         throw error;
+                    exceededToolLimit = error instanceof ToolCallLimitError;
                 }
             }
             if (structured) {
