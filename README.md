@@ -50,13 +50,13 @@ qoderclicn --list-models
 推荐直接使用 Release 安装包地址，固定到已发布版本：
 
 ```sh
-dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.6/dsh-qoder-link-0.1.6.tgz"
+dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.7/dsh-qoder-link-0.1.7.tgz"
 ```
 
 也可以从 GitHub 仓库的指定标签安装：
 
 ```sh
-dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.6"
+dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.7"
 ```
 
 `web` 是 DSH 配置名称；如果使用其他 profile，请替换成对应名称。安装后按提示重载插件或重启 DSH，刷新网页，在 **设置 → Qoder Link** 中选择国际版或中国版，并在终端完成对应 CLI 的登录。
@@ -64,13 +64,13 @@ dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.6"
 ### 从本地安装包安装
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.6.tgz
+dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.7.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.6.tgz
+dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.7.tgz
 ```
 
 也可在支持本地插件包的 DSH 插件管理界面选择 `.tgz`。按 DSH 提示重载插件或重启，刷新 Web 页面。
@@ -104,7 +104,7 @@ dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.6.
 
 ## 安全与行为边界
 
-- **模型适配器始终禁用 CLI 内置工具**，使用 `--tools ""`、严格空 MCP 配置、空设置来源和 `dont_ask` 权限模式。工具请求经有限、严格解析后交回 DSH，不执行回答中的任意代码片段。
+- **模型适配器始终禁用 CLI 内置工具**，使用 `--tools ""`、严格空 MCP 配置、空设置来源和 `dont_ask` 权限模式。ACP 是传输方式，不会自动把 DSH 工具注册成 Qoder 原生工具：模型按 JSON 返回请求，插件转换为 DSH 工具块，由 DSH 校验并执行。识别到说明文字混杂工具标记时，最多重新请求一次严格 JSON；不从任意正文或示例中提取工具执行。
 - `qoder_ask` 默认也禁用 CLI 内置工具。管理员显式配置委派工具后，CLI 内部工具在 DSH 文件沙箱之外执行；仅在可信工作区启用。桥接不提供客户端文件或终端能力，也不会自动批准 ACP 权限请求。
 - 每次请求启动全新 CLI，以 `--acp` 运行，经 stdin/stdout 交换 JSON-RPC 消息，完成 `initialize`、`session/new`、`session/prompt`。不恢复旧 ACP 会话，完整历史由 DSH 管理，不静默截断。CLI 自身可能持久化会话元数据，插件不承诺 CLI 侧零留存。
 - CLI 是本地外部进程，不是隔离容器。官方 CLI 版本可能仍读取工作区说明或自身配置；禁用工具/MCP 不等于操作系统级沙箱。
@@ -153,7 +153,7 @@ npm pack
 
 包包含预构建代码，安装时不需要 TypeScript 编译。CI 在 Windows 和 Linux 运行类型检查、自动测试、构建一致性检查和打包；推送 `v*` 标签时发布 GitHub Release 安装包。
 
-自动测试使用假 CLI 验证 ACP 握手、流式更新、权限拒绝、取消、无进展超时、进程清理、模型发现和 Web/UI 契约，不消耗模型额度。本机已验证两区域 CLI 均能返回模型目录；中国版在未注入 PAT 时完成真实 ACP 请求并返回 OK。国际版此前真实推理无进展超时，尚不能声明端到端推理验证通过。
+自动测试使用假 CLI 验证 ACP 握手、流式更新、权限拒绝、取消、无进展超时、进程清理、模型发现和 Web/UI 契约，不消耗模型额度。本机已验证两区域 CLI 均能返回模型目录；中国版完成真实 ACP → DSH ToolRuntime 执行只读探针 → 第二轮 ACP 读取实际工具结果的闭环。可手动运行 `node scripts/verify-acp-tools.mjs` 复核（需先构建，使用本机所选 CLI 和模型，会消耗模型额度；不注册或执行业务工具）。该探针不是完整 DSH 会话 AgentLoop 测试。国际版此前真实推理无进展超时，尚不能声明端到端推理验证通过。
 
 ## 参考与许可
 

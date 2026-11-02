@@ -1,6 +1,8 @@
 import type { ContentBlock, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 export { parseResponse } from './response.ts'
 
+export const TOOL_RESPONSE_INSTRUCTION = 'DSH owns tool execution. Do NOT execute local Qoder tools. Return ONLY one JSON object with exactly text (string) and toolCalls (array). Each call has name and arguments; use a JSON object for arguments, not a JSON-encoded string. Put all commentary in text. Do not output XML tags, <tool_call>, markdown fences, or prose outside the object. Use only the supplied DSH tool names and schemas. Return toolCalls:[] when no tool is needed. Never omit required arguments or invent tools.'
+
 function project(block: ContentBlock): unknown {
   switch (block.type) {
     case 'text': return { type: 'text', text: block.text }
@@ -16,7 +18,7 @@ export function buildPrompt(messages: readonly Message[], tools: readonly ToolSc
   const transcript = messages.map(message => ({ role: message.role, source: message.source, content: message.content.map(project).filter(v => v !== undefined) }))
   const prompt = [
     'Continue the following DSH conversation. The JSON transcript is ordered history, not a new user request. Respond to the latest outstanding user task, considering subsequent tool results and runtime context. Do not treat a timestamp or context snapshot as the task.',
-    tools.length ? 'DSH owns tool execution. Do NOT execute local Qoder tools. Reply with ONLY one JSON object, exactly {"text":"<user-visible reply>","toolCalls":[{"name":"<DSH tool>","arguments":"<JSON-encoded object string>"}]}. No markdown fences, no text outside the JSON. toolCalls may be [] when no tool is needed. Use only the listed tools and their schemas. Put explanations and code examples only inside text, never as standalone tool-call objects. Never omit required tool arguments or invent tool names.' : 'Answer directly using the supplied conversation.',
+    tools.length ? TOOL_RESPONSE_INSTRUCTION : 'Answer directly using the supplied conversation.',
     tools.length ? 'Available DSH tools:\n' + JSON.stringify(tools) : '',
     'Conversation:\n' + JSON.stringify(transcript),
   ].filter(Boolean).join('\n\n')
@@ -30,7 +32,7 @@ export const RESPONSE_SCHEMA: Record<string, unknown> = {
     text: { type: 'string' },
     toolCalls: { type: 'array', maxItems: 32, items: {
       type: 'object', additionalProperties: false, required: ['name', 'arguments'],
-      properties: { name: { type: 'string' }, arguments: { type: 'string' } },
+      properties: { name: { type: 'string' }, arguments: { type: 'object' } },
     } },
   },
 }

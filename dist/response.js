@@ -1,5 +1,9 @@
 import { parseDsml } from "./dsml.js";
 import { strictJson } from "./json.js";
+/** Recognizable tool syntax must never silently succeed as plain answer text. */
+export class ToolResponseFormatError extends Error {
+    constructor() { super('Qoder returned tool syntax mixed with prose; a strict response is required'); this.name = 'ToolResponseFormatError'; }
+}
 const MAX_DEPTH = 32;
 const MAX_DOCUMENTS = 64;
 const MAX_CALLS = 32;
@@ -461,6 +465,19 @@ export function parseResponse(value, tools) {
     // A real DSML document mixed into prose remains ambiguous; never execute it.
     if (input.includes('<｜｜DSML｜｜'))
         fail('DSML must be a standalone document');
+    if (/^[ \t]*<\/?tool_call\b/m.test(input))
+        throw new ToolResponseFormatError();
     return { text: raw, toolCalls: [] };
+}
+/** A format retry is not another permissive extraction pass. */
+export function parseStrictResponse(value, tools) {
+    const envelope = typeof value === 'string' ? strictJson(value.trim()) : value;
+    if (!object(envelope) || Object.keys(envelope).length !== 2 || typeof envelope.text !== 'string'
+        || !own(envelope, 'toolCalls') || !Array.isArray(envelope.toolCalls)
+        || /^[ \t]*<\/?tool_call\b/m.test(envelope.text))
+        fail('format retry must return one canonical JSON response');
+    const normalizer = new Normalizer(new Set(tools.map(tool => tool.name)));
+    normalizer.visit(envelope);
+    return normalizer.result();
 }
 //# sourceMappingURL=response.js.map

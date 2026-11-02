@@ -4,7 +4,8 @@ import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm';
 import { selectedBin, QODER_EFFORTS } from "./config.js";
 import { resolveEffort } from "./effort.js";
 import { CallRuntime } from "./runtime.js";
-import { buildPrompt, parseResponse } from "./prompt.js";
+import { buildPrompt, parseResponse, TOOL_RESPONSE_INSTRUCTION } from "./prompt.js";
+import { parseStrictResponse, ToolResponseFormatError } from "./response.js";
 import { runQoder } from "./runner.js";
 export { QODER_EFFORTS } from "./config.js";
 const EFFORT_LABELS = { auto: 'CLI 默认', low: '低', medium: '中', high: '高' };
@@ -47,7 +48,7 @@ export class QoderAdapter extends LlmAdapter {
         const selectedModel = options.model || cfg.defaultModel;
         if (!cfg.models.includes(selectedModel) || cfg.hiddenModels.includes(selectedModel))
             throw new Error('Qoder model is not enabled in settings');
-        const tools = options.purpose ? [] : options.tools ?? [];
+        const tools = options.purpose ? [] : structuredClone(options.tools ?? []);
         const structured = tools.length > 0;
         const cwd = cfg.workspaceRoot || (options.sessionId ? this.sessionCwd(options.sessionId) : undefined) || process.cwd();
         if (!isAbsolute(cwd))
@@ -85,31 +86,63 @@ export class QoderAdapter extends LlmAdapter {
         };
         try {
             // DSH executes validated tool envelopes; the CLI cannot execute local tools.
-            for await (const event of this.runtime.run({
-                prompt, systemPrompt: options.system, cwd, bin: selectedBin(cfg), cliVariant: cfg.cliVariant,
+            const request = {
+                prompt, systemPrompt: structured ? [options.system, TOOL_RESPONSE_INSTRUCTION].filter(Boolean).join('\n\n') : options.system, cwd, bin: selectedBin(cfg), cliVariant: cfg.cliVariant,
                 model: (options.model || cfg.defaultModel) === 'default' ? undefined : (options.model || cfg.defaultModel),
                 effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort), permissionMode: 'dont_ask', tools: '',
                 timeoutMs: cfg.timeoutMs, signal: options.signal,
-            }, 'model', this.runner, structured ? event => {
-                parseResponse(event.structuredOutput ?? (event.text || rawText), tools);
-            } : undefined)) {
-                if (event.type === 'text') {
-                    rawText += event.delta;
-                    if (!structured)
-                        yield* append('text', event.delta);
+            };
+            let response;
+            for (let attempt = 0; attempt < 2; attempt++) {
+                rawText = '';
+                resultText = '';
+                structuredOutput = undefined;
+                const previousUsage = usage;
+                const parse = (value, schemas) => {
+                    const result = (attempt ? parseStrictResponse : parseResponse)(value, schemas);
+                    if (/^[ \t]*<\/?tool_call\b/m.test(result.text))
+                        throw new ToolResponseFormatError();
+                    return result;
+                };
+                try {
+                    const attemptRequest = attempt ? { ...request,
+                        prompt: prompt + '\n\nYour previous response did not follow the transport format. Answer the same outstanding task again using ONLY the required JSON object. No tools from that response were executed. Do not quote or describe tool calls in text.',
+                    } : request;
+                    if (attemptRequest.prompt.length > cfg.maxPromptChars)
+                        throw new Error('Qoder format retry exceeds maxPromptChars; compact the conversation before retrying');
+                    for await (const event of this.runtime.run(attemptRequest, 'model', this.runner, structured ? event => {
+                        response = parse(event.structuredOutput ?? (event.text || rawText), tools);
+                    } : undefined)) {
+                        if (event.type === 'text') {
+                            rawText += event.delta;
+                            if (!structured)
+                                yield* append('text', event.delta);
+                        }
+                        else if (event.type === 'reasoning' && !structured)
+                            yield* append('reasoning', event.delta);
+                        else if (event.type === 'usage') {
+                            const next = { inputTokens: event.input, outputTokens: event.output, cacheReadTokens: event.cacheRead, cacheWriteTokens: event.cacheWrite };
+                            usage = previousUsage ? { inputTokens: previousUsage.inputTokens + next.inputTokens, outputTokens: previousUsage.outputTokens + next.outputTokens,
+                                cacheReadTokens: (previousUsage.cacheReadTokens ?? 0) + (next.cacheReadTokens ?? 0), cacheWriteTokens: (previousUsage.cacheWriteTokens ?? 0) + (next.cacheWriteTokens ?? 0) } : next;
+                        }
+                        else if (event.type === 'result') {
+                            sessionId = event.sessionId;
+                            resultText = event.text;
+                            structuredOutput = event.structuredOutput;
+                        }
+                    }
+                    if (structured)
+                        response = parse(structuredOutput ?? (resultText || rawText), tools);
+                    break;
                 }
-                else if (event.type === 'reasoning' && !structured)
-                    yield* append('reasoning', event.delta);
-                else if (event.type === 'usage')
-                    usage = { inputTokens: event.input, outputTokens: event.output, cacheReadTokens: event.cacheRead, cacheWriteTokens: event.cacheWrite };
-                else if (event.type === 'result') {
-                    sessionId = event.sessionId;
-                    resultText = event.text;
-                    structuredOutput = event.structuredOutput;
+                catch (error) {
+                    if (!structured || attempt || !(error instanceof ToolResponseFormatError) || options.signal?.aborted)
+                        throw error;
                 }
             }
             if (structured) {
-                const response = parseResponse(structuredOutput ?? (resultText || rawText), tools);
+                if (!response)
+                    throw new Error('Qoder response was not validated');
                 yield* append('text', response.text);
                 yield* close();
                 for (const call of response.toolCalls) {
