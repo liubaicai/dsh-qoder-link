@@ -142,7 +142,7 @@ test('model catalog aliases resolve to canonical IDs before switching or prompti
     const events = await collect({ ...f, prompt: 'model', model: entry.requested });
     assert.deepEqual(events[0], { type: 'metadata', model: entry.target });
     const wire = (await readFile(join(f.cwd, 'wire.ndjson'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    assert.equal(wire[0].params.clientInfo.version, '0.1.9');
+    assert.equal(wire[0].params.clientInfo.version, '0.1.10');
     const switches = wire.filter(row => row.method === 'session/set_model');
     assert.deepEqual(switches.map(row => row.params.modelId), entry.switchModel ? [entry.target] : []);
     assert.equal(wire.some(row => row.method === 'session/prompt'), true);

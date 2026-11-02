@@ -50,13 +50,13 @@ qoderclicn --list-models
 推荐直接使用 Release 安装包地址，固定到已发布版本：
 
 ```sh
-dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.9/dsh-qoder-link-0.1.9.tgz"
+dsh plugin --profile web add "https://github.com/liubaicai/dsh-qoder-link/releases/download/v0.1.10/dsh-qoder-link-0.1.10.tgz"
 ```
 
 也可以从 GitHub 仓库的指定标签安装：
 
 ```sh
-dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.9"
+dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.10"
 ```
 
 `web` 是 DSH 配置名称；如果使用其他 profile，请替换成对应名称。安装后按提示重载插件或重启 DSH，刷新网页，在 **设置 → Qoder Link** 中选择国际版或中国版，并在终端完成对应 CLI 的登录。
@@ -64,13 +64,13 @@ dsh plugin --profile web add "github:liubaicai/dsh-qoder-link#v0.1.9"
 ### 从本地安装包安装
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.9.tgz
+dsh plugin --profile web add /absolute/path/dsh-qoder-link-0.1.10.tgz
 ```
 
 Windows 示例：
 
 ```powershell
-dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.9.tgz
+dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.10.tgz
 ```
 
 也可在支持本地插件包的 DSH 插件管理界面选择 `.tgz`。按 DSH 提示重载插件或重启，刷新 Web 页面。
@@ -85,9 +85,11 @@ dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.9.
 4. 页面自动获取模型候选，也可点击“获取模型列表”。点击模型按钮启用，选择默认模型后保存；`default` 使用 CLI 自身默认值。区域或路径变更需先保存，再获取对应目录；刷新不会覆盖未保存的模型选择。
 5. 保存，在 DSH 模型选择器中选择 `qoder/default` 或启用的具体模型。模型候选不保证当前额度或所有模型的调用权限。
 
-插件默认启用，页面不再提供独立启用开关；不使用时请在 DSH 禁用插件。高级设置仅显示 CLI 路径，超时、并发、上下文预算等仍可通过下方底层配置调整；页面保存会保留这些值。
+插件默认启用，页面不再提供独立启用开关；不使用时请在 DSH 禁用插件。高级设置默认折叠，仅显示当前区域的“自定义 CLI 路径”；切换区域会保留两区各自路径。超时、并发、上下文预算等仍可通过下方底层配置调整，页面保存会保留这些值。
 
-模型发现使用临时工作目录和无 shell 子进程，设置超时及输出大小上限；失败仅显示固定诊断，不返回原始 CLI 错误。状态轮询不启动 CLI。模型配置目前仍在两个区域间共享，切换后请重新确认启用项。
+模型发现使用临时工作目录和无 shell 子进程，保留 12 秒超时及输出大小上限；固定诊断区分无法启动、超时、CLI 退出失败、输出超限和格式不兼容，不返回原始 CLI 错误。首次启动较慢时可稍后重试。状态轮询不启动 CLI。模型配置目前仍在两个区域间共享，切换后请重新确认启用项。
+
+运行记录仅保存在当前 DSH 进程内，保留最近 `max(5, maxConcurrency)` 条（5～16 条），页面与 `/qoder runs` 使用同一批元数据。每条记录显示调用 ID，方便对应失败和重试；它不是包含 ACP 帧或原始错误的调试日志。
 
 调用采用全局 FIFO 并发队列，不再有账户池或账户租约。区域在入队时固定，切换设置不会把已排队调用转到另一区域；CLI 自身的登录身份由其启动时读取。
 
@@ -107,7 +109,7 @@ dsh plugin --profile web add D:\Code\Github\dsh-qoder-link\dsh-qoder-link-0.1.9.
 - **模型适配器始终禁用 CLI 内置工具**，使用 `--tools ""`、严格空 MCP 配置、空设置来源和 `dont_ask` 权限模式。ACP 是传输方式，不会自动把 DSH 工具注册成 Qoder 原生工具：模型按 JSON 返回请求，插件转换为 DSH 工具块，由 DSH 校验并执行。识别到说明文字混杂工具标记、可恢复的 JSON 语法错误或工具批次超限时，共享最多一次严格 JSON 重新生成机会；不从任意正文或示例中提取工具执行。每个响应硬上限为 32 个工具调用，提示模型优先每批最多 8 个独立调用；超限整批拒绝，重新生成时要求只请求下一步调用，不截断、不部分执行、不在后台保存剩余调用。
 - `qoder_ask` 默认也禁用 CLI 内置工具。管理员显式配置委派工具后，CLI 内部工具在 DSH 文件沙箱之外执行；仅在可信工作区启用。桥接不提供客户端文件或终端能力，也不会自动批准 ACP 权限请求。
 - 每次请求启动全新 CLI，以 `--acp` 运行，经 stdin/stdout 交换 JSON-RPC 消息，完成 `initialize`、`session/new`、`session/prompt`。不恢复旧 ACP 会话，完整历史由 DSH 管理，不静默截断。CLI 自身可能持久化会话元数据，插件不承诺 CLI 侧零留存。
-- CLI 是本地外部进程，不是隔离容器。官方 CLI 版本可能仍读取工作区说明或自身配置；禁用工具/MCP 不等于操作系统级沙箱。
+- CLI 是本地外部进程，不是隔离容器。官方 CLI 版本可能仍读取工作区说明或自身配置；禁用工具/MCP 不等于操作系统级沙箱。工作目录依次采用显式 `workspaceRoot`、DSH 会话工作区、DSH 进程工作目录；如需固定目录，请配置 `workspaceRoot`。独立委派启用 CLI 工具时必须有明确的配置或会话工作区，不允许回退到进程目录。
 - 仅支持文本输入；图片会明确报错。工具可用时先缓冲并校验完整响应，再输出 DSH 工具调用；纯文本可随 CLI 事件输出。
 - 上下文窗口为 DSH 侧预算提示，不向 CLI 强制覆盖，也不自动推断账户真实额度。没有伪造的积分查询、登录成功或模型发现接口。
 - 子进程 stderr 可能包含敏感信息，错误只显示分类，不回传原始 stderr。诊断不保存提示词、参数、工作路径或凭据。
@@ -153,7 +155,7 @@ npm pack
 
 包包含预构建代码，安装时不需要 TypeScript 编译。CI 在 Windows 和 Linux 运行类型检查、自动测试、构建一致性检查和打包；推送 `v*` 标签时发布 GitHub Release 安装包。
 
-自动测试使用假 CLI 验证 ACP 握手、流式更新、权限拒绝、取消、无进展超时、进程清理、模型发现和 Web/UI 契约，不消耗模型额度。本机已验证两区域 CLI 均能返回模型目录；中国版完成真实 ACP → DSH ToolRuntime 执行只读探针 → 第二轮 ACP 读取实际工具结果的闭环。可手动运行 `node scripts/verify-acp-tools.mjs` 复核（需先构建，使用本机所选 CLI 和模型，会消耗模型额度；不注册或执行业务工具）。该探针不是完整 DSH 会话 AgentLoop 测试。国际版此前真实推理无进展超时，尚不能声明端到端推理验证通过。
+CI 不安装或登录任何官方 CLI。自动测试使用假 CLI 验证双区域选择、ACP 握手、流式更新、权限拒绝、取消、无进展超时、进程清理、模型发现和 Web/UI 契约，不消耗模型额度；这些测试不等于两区域真实服务验证。本机已验证两区域 CLI 均能返回模型目录；中国版完成真实 ACP → DSH ToolRuntime 执行只读探针 → 第二轮 ACP 读取实际工具结果的闭环。可手动运行 `node scripts/verify-acp-tools.mjs` 复核（需先构建，使用本机所选 CLI 和模型，会消耗模型额度；不注册或执行业务工具）。该探针不是完整 DSH 会话 AgentLoop 测试。**国际版此前真实推理无进展超时，尚未通过端到端推理验证。** 模型列表成功也不代表推理或工具闭环成功；使用国际版前请在自己的登录态下运行上述只读探针验证。
 
 ## 参考与许可
 

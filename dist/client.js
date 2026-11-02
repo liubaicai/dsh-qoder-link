@@ -14,7 +14,9 @@ const efforts = ['auto', 'low', 'medium', 'high'];
 const modes = ['dont_ask', 'default', 'accept_edits'];
 const modelId = (value) => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.exec(value)?.[0] === value && !value.includes(':/') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
 const integer = (value, min, max = Number.MAX_SAFE_INTEGER) => typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max;
-const modelMessages = ['已获取当前 CLI 模型列表。', '模型列表获取失败，请检查 CLI 安装、登录与网络后重试。', '模型列表尚未加载。'];
+const modelMessages = ['已获取当前 CLI 模型列表。', '模型列表获取失败，请检查 CLI 安装、登录与网络后重试。', '模型列表尚未加载。',
+    '无法启动所选 CLI，请检查安装与自定义路径。', '获取模型列表超时，请稍后重试并检查网络。', 'CLI 未能获取模型列表，请检查登录与网络后重试。', 'CLI 模型列表输出超出限制，请检查 CLI 版本。', 'CLI 模型列表格式无法识别，请检查 CLI 版本。'];
+const safeModelMessage = (value) => typeof value === 'string' && modelMessages.includes(value) ? value : undefined;
 function validateConfig(value) {
     if (!record(value))
         return '设置格式无效';
@@ -46,7 +48,7 @@ function parseStatus(value) {
         throw new Error('服务端状态格式无效');
     const runs = [];
     for (const run of value.runs) {
-        if (!record(run) || typeof run.id !== 'string' || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state)) || !integer(run.queuedAt, 0))
+        if (!record(run) || typeof run.id !== 'string' || /^[a-zA-Z0-9_-]{1,128}$/.exec(run.id)?.[0] !== run.id || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state)) || !integer(run.queuedAt, 0))
             continue;
         runs.push({ id: run.id, state: String(run.state), requestedModel: modelId(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort: efforts.includes(String(run.requestedEffort)) ? String(run.requestedEffort) : 'auto', queuedAt: run.queuedAt, warning: run.warning === true,
             failure: ['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure)) ? String(run.failure) : undefined,
@@ -54,8 +56,8 @@ function parseStatus(value) {
     }
     const c = value.config;
     const config = { enabled: c.enabled, cliVariant: c.cliVariant, qodercliBin: c.qodercliBin, qoderclicnBin: c.qoderclicnBin, models: c.models, hiddenModels: c.hiddenModels, defaultModel: c.defaultModel, tools: c.tools, permissionMode: c.permissionMode, reasoningEffort: c.reasoningEffort, timeoutMs: c.timeoutMs, contextWindow: c.contextWindow, maxPromptChars: c.maxPromptChars, workspaceRoot: c.workspaceRoot, maxConcurrency: c.maxConcurrency, queueTimeoutMs: c.queueTimeoutMs, stallWarnMs: c.stallWarnMs, askTool: c.askTool, modelContext: c.modelContext };
-    return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0, config, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5),
-        catalogModels: catalog.map(item => ({ id: item.id, name: item.name })), modelMessage: modelMessages.includes(String(value.modelMessage)) ? String(value.modelMessage) : modelMessages[2] };
+    return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0, config, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, Math.max(5, config.maxConcurrency)),
+        catalogModels: catalog.map(item => ({ id: item.id, name: item.name })), modelMessage: safeModelMessage(value.modelMessage) ?? modelMessages[2] };
 }
 async function request(action, body) {
     let response;
@@ -66,8 +68,18 @@ async function request(action, body) {
     catch {
         throw new Error('请求失败或超时，请检查连接后重试。');
     }
-    if (!response.ok)
-        throw new Error(`请求失败（HTTP ${response.status}），请检查设置后重试。`);
+    if (!response.ok) {
+        let modelMessage;
+        if (action === 'models') {
+            try {
+                const value = await response.json();
+                if (record(value))
+                    modelMessage = safeModelMessage(value.modelMessage);
+            }
+            catch { }
+        }
+        throw new Error(modelMessage ?? `请求失败（HTTP ${response.status}），请检查设置后重试。`);
+    }
     try {
         return parseStatus(await response.json());
     }
@@ -183,7 +195,7 @@ function SettingsPanel() {
     const update = (patch) => { if (draftRef.current)
         setDraft({ ...draftRef.current, ...patch }); setNotice(''); };
     const valueChange = (key) => (event) => update({ [key]: event.target.value });
-    const textField = (key, label) => h('label', { style: field }, label, h('input', { value: draft?.[key] ?? '', onChange: valueChange(key) }));
+    const pathKey = draft?.cliVariant === 'qoderclicn' ? 'qoderclicnBin' : 'qodercliBin';
     const select = (key, label, values, labels) => h('label', { style: field }, label, h('select', { value: draft?.[key], disabled: key === 'defaultModel' && dirtyCli(), onChange: valueChange(key) }, !values.includes(draft?.[key] ?? '') ? h('option', { value: draft?.[key] ?? '', disabled: true }, '请选择有效值') : null, ...values.map(value => h('option', { key: value, value }, labels?.get(value) ?? value))));
     const validation = draft ? validateConfig(draft) : '';
     const changedCli = dirtyCli();
@@ -203,7 +215,7 @@ function SettingsPanel() {
             setDismissed(true); },
         style: { fontSize: '12px', minHeight: '24px', minWidth: '24px', padding: '1px 6px', color: secondary } }, '?'), tooltip ? h('span', { id: helpId.current, role: 'tooltip', style: { position: 'absolute', zIndex: 10, top: '100%', left: '-160px', width: 'min(320px, 70vw)', boxSizing: 'border-box', padding: '10px 12px', border, borderRadius: '6px', background: 'var(--dsw-alias-bg-base, var(--gray-2))', color: foreground, fontSize: '12px', fontWeight: 400, lineHeight: 1.6 } }, safety) : null))), h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', null, '启用模型'), h('button', { type: 'button', disabled: locked || changedCli || !!status?.settingsError, onClick: () => void load('models') }, '获取模型列表')), changedCli ? h('p', { role: 'status' }, 'CLI 区域或路径尚未保存。请先保存设置，再获取该区域的模型；旧区域模型已隐藏。') : h('p', { style: { fontSize: '12px' }, role: 'status' }, status?.modelMessage), h('div', { role: 'group', 'aria-label': '启用模型', style: { ...row, gap: '6px', marginBottom: '14px' } }, ...[...models].map(([id, label]) => h('button', { key: id, type: 'button', 'aria-label': `${label} (${id})`, 'aria-pressed': enabled.includes(id), style: { borderRadius: '16px', overflowWrap: 'anywhere', ...(enabled.includes(id) ? selectedStyle : {}) },
         onClick: () => { if (dirtyCli() || pending.current)
-            return; const current = draftRef.current; const on = current.models.includes(id) && !current.hiddenModels.includes(id); update({ models: on ? current.models : [...new Set([...current.models, id])], hiddenModels: on ? [...new Set([...current.hiddenModels, id])] : current.hiddenModels.filter(item => item !== id), defaultModel: on && current.defaultModel === id ? enabled.find(item => item !== id) ?? '' : current.defaultModel }); } }, label))), h('div', { style: grid }, select('defaultModel', '默认模型', enabled, models), select('permissionMode', '权限模式', modes, new Map([['dont_ask', '不询问'], ['default', '默认'], ['accept_edits', '接受编辑']])), select('reasoningEffort', '默认推理强度', efforts)), h('div', { style: { ...row, justifyContent: 'flex-end' } }, h('button', { type: 'button', disabled: locked || !!status?.settingsError || !!validation, onClick: () => void load('config') }, '保存设置')), validation ? h('p', { role: 'alert' }, validation) : null), h('details', { style: box }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '高级设置'), h('fieldset', { disabled: locked, style: { border: 0, padding: '12px 0 0', margin: 0, minWidth: 0 } }, h('div', { style: grid }, textField('qodercliBin', '国际版 CLI 路径'), textField('qoderclicnBin', '中国版 CLI 路径'))))) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内最近 5 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。'), h('div', { style: { maxHeight: '360px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(run => h('article', { key: run.id, style: { borderTop: border, padding: '8px 0', overflowWrap: 'anywhere' } }, h('p', null, `${{ queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消' }[run.state]}；模型：${run.requestedModel}；推理强度请求：${run.requestedEffort}（未确认）`), run.lastProgressAt !== undefined ? h('p', null, `最近进展：${new Date(run.lastProgressAt).toLocaleTimeString()}`) : null, run.failure ? h('p', null, { timeout: '无进展超时', 'queue-timeout': '排队超时', aborted: '已中止', error: '执行失败' }[run.failure]) : null, run.warning ? h('p', { role: 'status' }, '长时间无进展，仍在等待；这不代表失败。') : null)) : [h('p', { key: 'empty' }, '暂无运行记录')]))));
+            return; const current = draftRef.current; const on = current.models.includes(id) && !current.hiddenModels.includes(id); update({ models: on ? current.models : [...new Set([...current.models, id])], hiddenModels: on ? [...new Set([...current.hiddenModels, id])] : current.hiddenModels.filter(item => item !== id), defaultModel: on && current.defaultModel === id ? enabled.find(item => item !== id) ?? '' : current.defaultModel }); } }, label))), h('div', { style: grid }, select('defaultModel', '默认模型', enabled, models), select('permissionMode', '权限模式', modes, new Map([['dont_ask', '不询问'], ['default', '默认'], ['accept_edits', '接受编辑']])), select('reasoningEffort', '默认推理强度', efforts)), h('div', { style: { ...row, justifyContent: 'flex-end' } }, h('button', { type: 'button', disabled: locked || !!status?.settingsError || !!validation, onClick: () => void load('config') }, '保存设置')), validation ? h('p', { role: 'alert' }, validation) : null), h('details', { style: box }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '高级设置'), h('fieldset', { disabled: locked, style: { border: 0, padding: '12px 0 0', margin: 0, minWidth: 0 } }, h('label', { style: field }, '自定义 CLI 路径', h('input', { value: draft[pathKey], placeholder: draft.cliVariant, onChange: valueChange(pathKey) }))))) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, `当前进程内最近 ${Math.max(5, status?.config.maxConcurrency ?? 5)} 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。`), h('div', { style: { maxHeight: '360px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(run => h('article', { key: run.id, style: { borderTop: border, padding: '8px 0', overflowWrap: 'anywhere' } }, h('p', null, `调用 ID：${run.id}`), h('p', null, `${{ queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消' }[run.state]}；模型：${run.requestedModel}；推理强度请求：${run.requestedEffort}（未确认）`), run.lastProgressAt !== undefined ? h('p', null, `最近进展：${new Date(run.lastProgressAt).toLocaleTimeString()}`) : null, run.failure ? h('p', null, { timeout: '无进展超时', 'queue-timeout': '排队超时', aborted: '已中止', error: '执行失败' }[run.failure]) : null, run.warning ? h('p', { role: 'status' }, '长时间无进展，仍在等待；这不代表失败。') : null)) : [h('p', { key: 'empty' }, '暂无运行记录')]))));
 }
 function apply(ctx) {
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'qoder-link', order: 20, label: 'Qoder Link' }, SettingsPanel));

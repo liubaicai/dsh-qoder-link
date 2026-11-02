@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SettingsStore } from '../src/settings.ts'
 import { registerSettingsRoutes, type RefreshModels } from '../src/web.ts'
+import { ModelDiscoveryError, modelFailures, modelFailure } from '../src/models.ts'
 
 type Handler = (req: IncomingMessage, res: ServerResponse) => void
 async function fixture(run: (ctx: {base: string; store: SettingsStore; notifications: () => number; routes: Map<string, Handler>; dispose: () => void}) => Promise<void>, runs: unknown[] = [], refreshModels?: RefreshModels) {
@@ -70,7 +71,11 @@ test('metadata snapshots redact run internals and retain newest five', async () 
     assert.deepEqual(body.runs.map((run: {id: string}) => run.id), ['run-7', 'run-6', 'run-5', 'run-4', 'run-3'])
     assert.equal(body.runs[0].contextOverrideSent, false)
     assert.equal(body.runs[0].reasoningConfirmed, false)
-  }, [...runs, {id: 'bad', source: 'model', state: 'secret-state', queuedAt: 999}])
+    store.config.maxConcurrency = 16
+    const expanded = await (await fetch(base + '/plugins/qoder-link/status')).json()
+    assert.equal(expanded.runs.length, 8)
+    assert.deepEqual(expanded.runs.map((run: {id: string}) => run.id), [...runs].reverse().map(run => run.id))
+  }, [...runs, {id: 'bad', source: 'model', state: 'secret-state', queuedAt: 999}, {id: 'run-secret\n', source: 'model', state: 'completed', queuedAt: 1000}])
 })
 
 test('public runs retain stable top five ties from large unsorted inputs without sorting', async () => {
@@ -163,14 +168,21 @@ test('model discovery has one process slot across same and changed configuration
   },[],()=>{calls++;if(calls>1)return Promise.resolve({models:[],message:'SECRET'});started();return new Promise(resolve=>{finish=resolve})})
 })
 
-test('model discovery exceptions do not expose credentials or paths',async()=>{
-  await fixture(async({base})=>{
-    const response=await fetch(base+'/plugins/qoder-link/models',post({}));assert.equal(response.status,400)
-    assert.doesNotMatch(await response.text(),/SECRET/)
-  },[],async()=>{throw new Error('SECRET PAT C:/private')})
+test('model discovery exposes fixed failure categories, never error messages or paths',async()=>{
+  const timeout = new ModelDiscoveryError('timeout'); timeout.message = 'SECRET PAT C:/private'
+  for (const [error, expected] of [[new Error('SECRET PAT C:/private'), modelFailure], [timeout, modelFailures.timeout]] as const) {
+    await fixture(async({base})=>{
+      const root=base+'/plugins/qoder-link'
+      const response=await fetch(root+'/models',post({}));assert.equal(response.status,400)
+      const body=await response.json()
+      assert.equal(body.modelMessage,expected)
+      assert.doesNotMatch(JSON.stringify(body),/SECRET|private/)
+      assert.equal((await (await fetch(root+'/status')).json()).modelMessage,expected)
+    },[],async()=>{throw error})
+  }
 })
 
-test('all existing advanced panel fields remain editable', async () => {
+test('advanced API settings remain editable without exposing extra UI fields', async () => {
   await fixture(async ({base,store})=>{
     const patch={...store.config,enabled:false,askTool:false,cliVariant:'qoderclicn',qodercliBin:'global-cli',qoderclicnBin:'china-cli',workspaceRoot:tmpdir(),timeoutMs:1234,contextWindow:9000,maxPromptChars:5000,maxConcurrency:3,queueTimeoutMs:2345,stallWarnMs:0,tools:'Read',permissionMode:'accept_edits',reasoningEffort:'high',modelContext:{default:8000}}
     assert.equal((await fetch(base+'/plugins/qoder-link/config',post(patch))).status,200)

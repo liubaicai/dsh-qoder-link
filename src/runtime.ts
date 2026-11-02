@@ -36,6 +36,7 @@ export class CallRuntime {
   private active = 0
   constructor(config: PluginConfig) { this.config = config }
   snapshots(): RunSnapshot[] {
+    this.prune()
     const now = Date.now()
     return [...this.records.values()].reverse().map(record => ({
       ...record,
@@ -47,7 +48,8 @@ export class CallRuntime {
   private prune(): void {
     // Diagnostic retention is independent of scheduling: evicted live calls keep
     // their local record and queue slot, but never re-enter the recent history.
-    for (const id of [...this.records.keys()].slice(0, Math.max(0, this.records.size - 5))) this.records.delete(id)
+    const limit = Math.max(5, this.config.maxConcurrency)
+    for (const id of [...this.records.keys()].slice(0, Math.max(0, this.records.size - limit))) this.records.delete(id)
   }
   /** Re-evaluate live concurrency changes without interrupting active calls. */
   refresh(): void { this.pump() }

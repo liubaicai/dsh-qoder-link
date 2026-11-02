@@ -28,7 +28,9 @@ const efforts = ['auto', 'low', 'medium', 'high']
 const modes = ['dont_ask', 'default', 'accept_edits']
 const modelId = (value: unknown): value is string => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.exec(value)?.[0] === value && !value.includes(':/') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..')
 const integer = (value: unknown, min: number, max = Number.MAX_SAFE_INTEGER): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max
-const modelMessages = ['已获取当前 CLI 模型列表。', '模型列表获取失败，请检查 CLI 安装、登录与网络后重试。', '模型列表尚未加载。']
+const modelMessages = ['已获取当前 CLI 模型列表。', '模型列表获取失败，请检查 CLI 安装、登录与网络后重试。', '模型列表尚未加载。',
+  '无法启动所选 CLI，请检查安装与自定义路径。', '获取模型列表超时，请稍后重试并检查网络。', 'CLI 未能获取模型列表，请检查登录与网络后重试。', 'CLI 模型列表输出超出限制，请检查 CLI 版本。', 'CLI 模型列表格式无法识别，请检查 CLI 版本。']
+const safeModelMessage = (value: unknown): string | undefined => typeof value === 'string' && modelMessages.includes(value) ? value : undefined
 export function validateConfig(value: unknown): string {
   if (!record(value)) return '设置格式无效'
   if (typeof value.enabled !== 'boolean' || typeof value.askTool !== 'boolean' || !['qodercli', 'qoderclicn'].includes(String(value.cliVariant))) return '请选择有效的 CLI 版本'
@@ -48,22 +50,28 @@ export function parseStatus(value: unknown): Status {
   if (!Array.isArray(catalog) || catalog.length > 1000 || !catalog.every(item => record(item) && modelId(item.id) && typeof item.name === 'string' && item.name.length > 0 && item.name.length <= 128 && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(item.name))) throw new Error('服务端状态格式无效')
   const runs: Run[] = []
   for (const run of value.runs) {
-    if (!record(run) || typeof run.id !== 'string' || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state)) || !integer(run.queuedAt, 0)) continue
+    if (!record(run) || typeof run.id !== 'string' || /^[a-zA-Z0-9_-]{1,128}$/.exec(run.id)?.[0] !== run.id || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state)) || !integer(run.queuedAt, 0)) continue
     runs.push({id: run.id, state: String(run.state), requestedModel: modelId(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort: efforts.includes(String(run.requestedEffort)) ? String(run.requestedEffort) : 'auto', queuedAt: run.queuedAt, warning: run.warning === true,
       failure: ['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure)) ? String(run.failure) : undefined,
       lastProgressAt: integer(run.lastProgressAt, 0) ? run.lastProgressAt : undefined})
   }
   const c = value.config as unknown as Config
   const config: Config = {enabled:c.enabled, cliVariant:c.cliVariant, qodercliBin:c.qodercliBin, qoderclicnBin:c.qoderclicnBin, models:c.models, hiddenModels:c.hiddenModels, defaultModel:c.defaultModel, tools:c.tools, permissionMode:c.permissionMode, reasoningEffort:c.reasoningEffort, timeoutMs:c.timeoutMs, contextWindow:c.contextWindow, maxPromptChars:c.maxPromptChars, workspaceRoot:c.workspaceRoot, maxConcurrency:c.maxConcurrency, queueTimeoutMs:c.queueTimeoutMs, stallWarnMs:c.stallWarnMs, askTool:c.askTool, modelContext:c.modelContext}
-  return {settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0, config, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5),
-    catalogModels: catalog.map(item => ({id: item.id as string, name: item.name as string})), modelMessage: modelMessages.includes(String(value.modelMessage)) ? String(value.modelMessage) : modelMessages[2]!}
+  return {settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0, config, runs: runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, Math.max(5, config.maxConcurrency)),
+    catalogModels: catalog.map(item => ({id: item.id as string, name: item.name as string})), modelMessage: safeModelMessage(value.modelMessage) ?? modelMessages[2]!}
 }
 async function request(action: 'status' | 'config' | 'models', body?: unknown): Promise<Status> {
   let response: Response
   try { response = await fetch(`/plugins/qoder-link/${action}`, {method: action === 'status' ? 'GET' : 'POST', credentials: 'same-origin', mode: 'same-origin', signal: AbortSignal.timeout(20000),
     ...(body === undefined ? {} : {headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})}) }
   catch { throw new Error('请求失败或超时，请检查连接后重试。') }
-  if (!response.ok) throw new Error(`请求失败（HTTP ${response.status}），请检查设置后重试。`)
+  if (!response.ok) {
+    let modelMessage: string | undefined
+    if (action === 'models') {
+      try {const value: unknown = await response.json(); if (record(value)) modelMessage = safeModelMessage(value.modelMessage)} catch {}
+    }
+    throw new Error(modelMessage ?? `请求失败（HTTP ${response.status}），请检查设置后重试。`)
+  }
   try { return parseStatus(await response.json()) } catch { throw new Error('服务端状态格式无效，请重试。') }
 }
 const border = '0.5px solid var(--dsw-alias-border-l2, var(--gray-6))'
@@ -145,7 +153,7 @@ function SettingsPanel(): unknown {
   }, [])
   const update = (patch: Partial<Config>) => {if (draftRef.current) setDraft({...draftRef.current, ...patch}); setNotice('')}
   const valueChange = (key: keyof Config) => (event: {target: {value: string}}) => update({[key]: event.target.value})
-  const textField = (key: 'qodercliBin' | 'qoderclicnBin', label: string) => h('label', {style: field}, label, h('input', {value: draft?.[key] ?? '', onChange: valueChange(key)}))
+  const pathKey = draft?.cliVariant === 'qoderclicn' ? 'qoderclicnBin' : 'qodercliBin'
   const select = (key: 'defaultModel' | 'permissionMode' | 'reasoningEffort', label: string, values: string[], labels?: Map<string, string>) => h('label', {style: field}, label,
     h('select', {value: draft?.[key], disabled: key === 'defaultModel' && dirtyCli(), onChange: valueChange(key)},
       !values.includes(draft?.[key] ?? '') ? h('option', {value: draft?.[key] ?? '', disabled: true}, '请选择有效值') : null,
@@ -185,9 +193,10 @@ function SettingsPanel(): unknown {
         validation ? h('p', {role: 'alert'}, validation) : null),
       h('details', {style: box}, h('summary', {style: {cursor: 'pointer', fontWeight: 600}}, '高级设置'),
         h('fieldset', {disabled: locked, style: {border: 0, padding: '12px 0 0', margin: 0, minWidth: 0}},
-          h('div', {style: grid}, textField('qodercliBin', '国际版 CLI 路径'), textField('qoderclicnBin', '中国版 CLI 路径'))))) : null,
-    h('details', {style: box, 'aria-label': '运行记录'}, h('summary', {style: {cursor: 'pointer', fontWeight: 600}}, `运行记录（${status?.runs.length ?? 0}）`), h('p', {style: {fontSize: '12px'}}, '当前进程内最近 5 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。'),
+          h('label', {style: field}, '自定义 CLI 路径', h('input', {value: draft[pathKey], placeholder: draft.cliVariant, onChange: valueChange(pathKey)}))))) : null,
+    h('details', {style: box, 'aria-label': '运行记录'}, h('summary', {style: {cursor: 'pointer', fontWeight: 600}}, `运行记录（${status?.runs.length ?? 0}）`), h('p', {style: {fontSize: '12px'}}, `当前进程内最近 ${Math.max(5, status?.config.maxConcurrency ?? 5)} 条，每 2 秒刷新。不展示提示词、原始输出或错误详情。`),
       h('div', {style: {maxHeight: '360px', overflowY: 'auto'}}, ...(status?.runs.length ? status.runs.map(run => h('article', {key: run.id, style: {borderTop: border, padding: '8px 0', overflowWrap: 'anywhere'}},
+        h('p', null, `调用 ID：${run.id}`),
         h('p', null, `${({queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消'} as Record<string, string>)[run.state]}；模型：${run.requestedModel}；推理强度请求：${run.requestedEffort}（未确认）`),
         run.lastProgressAt !== undefined ? h('p', null, `最近进展：${new Date(run.lastProgressAt).toLocaleTimeString()}`) : null,
         run.failure ? h('p', null, ({timeout: '无进展超时', 'queue-timeout': '排队超时', aborted: '已中止', error: '执行失败'} as Record<string, string>)[run.failure]) : null,

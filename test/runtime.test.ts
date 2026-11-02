@@ -83,8 +83,8 @@ test('failure and validation errors are classified without leaking details; queu
   assert.equal(runtime.snapshots()[0]!.state, 'completed')
 })
 
-test('runtime retains only five recent records and rejects unsafe metadata', async () => {
-  const runtime = new CallRuntime(resolveConfig({}, {}))
+test('runtime bounds recent history by concurrency and rejects unsafe metadata', async () => {
+  const config = resolveConfig({}, {}), runtime = new CallRuntime(config)
   const runner: typeof runQoder = async function* () {
     yield { type: 'metadata', model: 'unsafe\n', totalCredits: NaN, totalCostUsd: -1 }
     yield { type: 'result', text: 'ok' }
@@ -93,6 +93,11 @@ test('runtime retains only five recent records and rejects unsafe metadata', asy
   const snapshots = runtime.snapshots()
   assert.equal(snapshots.length, 5)
   assert.ok(snapshots.every(run => run.returnedModel === undefined && run.totalCredits === undefined && run.totalCostUsd === undefined && run.contextSource === 'fallback'))
+  config.maxConcurrency = 16
+  for (let i = 0; i < 17; i++) await collect(runtime.run(request, 'model', runner))
+  assert.equal(runtime.snapshots().length, 16)
+  config.maxConcurrency = 1
+  assert.equal(runtime.snapshots().length, 5)
 })
 
 test('pre-abort does not invoke CLI and bounded queue rejects overflow', async () => {

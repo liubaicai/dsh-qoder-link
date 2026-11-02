@@ -3,12 +3,12 @@ import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { discoverModels, parseModels, modelFailure } from '../src/models.ts'
+import { discoverModels, parseModels, modelFailures, ModelDiscoveryError } from '../src/models.ts'
 import { resolveConfig } from '../src/config.ts'
 
 test('official model table parser validates header, bounds and identifiers', () => {
   assert.deepEqual(parseModels('\x1b[1mMODEL\x1b[0m\r\nAuto\r\nFast\r\nAuto\n'), [{id:'Auto',name:'Auto'},{id:'Fast',name:'Fast'}])
-  for (const output of ['', 'MODEL', 'Please login', 'MODEL\nhttps://secret', 'MODEL\ninvalid model', 'MODEL\n' + Array(257).fill('Auto').join('\n')]) assert.throws(() => parseModels(output), {message:modelFailure})
+  for (const output of ['', 'MODEL', 'Please login', 'MODEL\nhttps://secret', 'MODEL\ninvalid model', 'MODEL\n' + Array(257).fill('Auto').join('\n')]) assert.throws(() => parseModels(output), {message:modelFailures.format})
 })
 test('discovery selects each regional binary, strips PAT, and sanitizes failure paths', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'qoder-discovery-test-'))
@@ -24,9 +24,18 @@ test('discovery selects each regional binary, strips PAT, and sanitizes failure 
     }
   } finally { if (previous === undefined) delete process.env.QODER_PERSONAL_ACCESS_TOKEN; else process.env.QODER_PERSONAL_ACCESS_TOKEN = previous }
   const config = resolveConfig({qodercliBin:bin}, {})
-  for (const source of [`console.error('SECRET');process.exit(1)`, `console.log('SECRET')`, `process.stdout.write('x'.repeat(70000));setInterval(()=>{},1000)`, `setInterval(()=>{},1000)`]) {
+  for (const [source, kind] of [
+    [`console.error('SECRET');process.exit(1)`, 'exit'], [`console.log('SECRET')`, 'format'],
+    [`process.stdout.write('x'.repeat(70000));setInterval(()=>{},1000)`, 'output'], [`setInterval(()=>{},1000)`, 'timeout'],
+  ] as const) {
     await writeFile(bin, source)
-    await assert.rejects(discoverModels(config, 500), {message:modelFailure})
+    await assert.rejects(discoverModels(config, kind === 'timeout' ? 500 : 4000), error => {
+      assert.ok(error instanceof ModelDiscoveryError)
+      assert.equal(error.kind, kind)
+      assert.equal(error.message, modelFailures[kind])
+      assert.doesNotMatch(error.message, /SECRET|private|fake\.mjs/)
+      return true
+    })
   }
-  await assert.rejects(discoverModels(resolveConfig({qodercliBin:join(directory,'missing')}, {})), {message:modelFailure})
+  await assert.rejects(discoverModels(resolveConfig({qodercliBin:join(directory,'missing')}, {})), {message:modelFailures.unavailable})
 })

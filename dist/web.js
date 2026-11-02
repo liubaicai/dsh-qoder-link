@@ -1,3 +1,4 @@
+import { modelFailureMessage } from "./models.js";
 const configKeys = ['enabled', 'cliVariant', 'qodercliBin', 'qoderclicnBin', 'models', 'defaultModel', 'hiddenModels', 'tools', 'permissionMode', 'reasoningEffort', 'timeoutMs', 'contextWindow', 'maxPromptChars', 'workspaceRoot', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs', 'askTool', 'modelContext'];
 const record = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
 const modelId = (value) => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.exec(value)?.[0] === value && !value.includes(':/') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
@@ -19,7 +20,7 @@ export function registerSettingsRoutes(server, store, notify, readRuns = () => [
     };
     const snapshot = () => {
         syncIdentity();
-        return { ...(store.loadError ? { settingsError: store.loadError } : {}), config: Object.fromEntries(configKeys.map(key => [key, store.config[key]])), runs: publicRuns(readRuns()), catalogModels, modelMessage };
+        return { ...(store.loadError ? { settingsError: store.loadError } : {}), config: Object.fromEntries(configKeys.map(key => [key, store.config[key]])), runs: publicRuns(readRuns(), Math.max(5, store.config.maxConcurrency)), catalogModels, modelMessage };
     };
     for (const action of ['status', 'config', 'models']) {
         const dispose = server.register({ kind: 'exact', path: `/plugins/qoder-link/${action}`, handler: (req, res) => {
@@ -90,11 +91,19 @@ export function registerSettingsRoutes(server, store, notify, readRuns = () => [
                                 try {
                                     result = await refreshModels(config);
                                 }
-                                catch {
+                                catch (error) {
                                     syncIdentity();
-                                    if (!disposed && startedEpoch === epoch)
-                                        modelMessage = '模型列表获取失败，请检查 CLI 安装、登录与网络后重试。';
-                                    throw new Error('Model discovery failed');
+                                    if (disposed) {
+                                        send(503, { error: 'Plugin is disposed' });
+                                        return;
+                                    }
+                                    if (startedEpoch !== epoch) {
+                                        send(409, { error: 'Model discovery configuration changed; refresh again' });
+                                        return;
+                                    }
+                                    modelMessage = modelFailureMessage(error);
+                                    send(400, { error: 'Model discovery failed', modelMessage });
+                                    return;
                                 }
                                 finally {
                                     refreshing = false;
@@ -152,12 +161,12 @@ async function readJson(req) {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 /** Deliberate allowlist: prompts, outputs, errors, credentials and billing never leave the runner. */
-function publicRuns(values) {
+function publicRuns(values, limit) {
     if (!Array.isArray(values))
         return [];
     const result = [];
     for (const run of values) {
-        if (!record(run) || typeof run.id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(run.id)
+        if (!record(run) || typeof run.id !== 'string' || /^[a-zA-Z0-9_-]{1,128}$/.exec(run.id)?.[0] !== run.id
             || !['model', 'ask'].includes(String(run.source))
             || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state))
             || typeof run.queuedAt !== 'number' || !Number.isFinite(run.queuedAt) || run.queuedAt < 0)
@@ -177,13 +186,13 @@ function publicRuns(values) {
         }
         if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure)))
             clean.failure = run.failure;
-        // Keep only five candidates; insert after ties for stable input ordering.
+        // Bounded by validated concurrency (5–16); stable ordering for tied times.
         const position = result.findIndex(entry => Number(entry.queuedAt) < Number(run.queuedAt));
         if (position >= 0)
             result.splice(position, 0, clean);
-        else if (result.length < 5)
+        else if (result.length < limit)
             result.push(clean);
-        if (result.length > 5)
+        if (result.length > limit)
             result.pop();
     }
     return result;
