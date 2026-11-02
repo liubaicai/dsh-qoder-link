@@ -1,5 +1,5 @@
 import { parseDsml } from "./dsml.js";
-import { strictJson } from "./json.js";
+import { strictJson, ResponseJsonSyntaxError } from "./json.js";
 /** Recognizable tool syntax must never silently succeed as plain answer text. */
 export class ToolResponseFormatError extends Error {
     constructor() { super('Qoder returned tool syntax mixed with prose; a strict response is required'); this.name = 'ToolResponseFormatError'; }
@@ -50,6 +50,8 @@ function documents(input, allowFence = true) {
             const start = i;
             const stack = [];
             let inString = false, escaped = false;
+            if (input[i] === '}' || input[i] === ']')
+                throw new ResponseJsonSyntaxError('unmatched JSON closing delimiter');
             if (!['{', '[', '"'].includes(input[i]))
                 fail('unexpected text outside structured response');
             const quoted = input[i] === '"';
@@ -78,7 +80,7 @@ function documents(input, allowFence = true) {
                 }
                 else if (c === '}' || c === ']') {
                     if (stack.pop() !== (c === '}' ? '{' : '['))
-                        fail('mismatched JSON delimiters');
+                        throw new ResponseJsonSyntaxError('mismatched JSON delimiters');
                     if (!stack.length) {
                         i++;
                         break;
@@ -86,7 +88,7 @@ function documents(input, allowFence = true) {
                 }
             }
             if (inString || stack.length)
-                fail('incomplete JSON document');
+                throw new ResponseJsonSyntaxError('incomplete JSON document');
             result.push(strictJson(input.slice(start, i)));
         }
         if (result.length > MAX_DOCUMENTS)

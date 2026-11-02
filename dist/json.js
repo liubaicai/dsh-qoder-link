@@ -1,6 +1,14 @@
+/** Syntax failure may request a fresh response, never repair or execute this one. */
+export class ResponseJsonSyntaxError extends Error {
+    constructor(detail) { super(`Invalid Qoder response envelope: ${detail}`); this.name = 'ResponseJsonSyntaxError'; }
+}
 /** Strict JSON with bounded nesting and duplicate-key rejection. No repair/eval. */
 export function strictJson(input) {
-    const fail = (detail) => { throw new Error(`Invalid Qoder response envelope: ${detail}`); };
+    const fail = (detail) => {
+        if (!['duplicate JSON key', 'JSON nesting limit exceeded', 'non-finite JSON number'].includes(detail))
+            throw new ResponseJsonSyntaxError(detail);
+        throw new Error(`Invalid Qoder response envelope: ${detail}`);
+    };
     let i = 0;
     const ws = () => { while (i < input.length && /\s/.test(input[i]))
         i++; };

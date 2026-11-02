@@ -6,6 +6,7 @@ import { resolveEffort } from './effort.ts'
 import { CallRuntime } from './runtime.ts'
 import { buildPrompt, parseResponse, TOOL_RESPONSE_INSTRUCTION } from './prompt.ts'
 import { parseStrictResponse, ToolResponseFormatError } from './response.ts'
+import { ResponseJsonSyntaxError } from './json.ts'
 import { runQoder } from './runner.ts'
 
 export type Runner = typeof runQoder
@@ -92,7 +93,8 @@ export class QoderAdapter extends LlmAdapter {
         }
         try {
           const attemptRequest = attempt ? { ...request,
-            prompt: prompt + '\n\nYour previous response did not follow the transport format. Answer the same outstanding task again using ONLY the required JSON object. No tools from that response were executed. Do not quote or describe tool calls in text.',
+            systemPrompt: request.systemPrompt + '\n\nOUTPUT TRANSPORT REQUIREMENT: This response is consumed by JSON.parse, not displayed as chat. The first non-whitespace character MUST be { and the last MUST be }. Produce exactly {"text":"","toolCalls":[]} with real pending calls in toolCalls. For this retry, if a tool is needed keep text empty and request at most ONE next tool with arguments as an object. If the task is finished, put the final answer in text and use toolCalls:[] instead. Never prepend an explanation, reasoning, a tag or a fence. Never say the tool already ran. All conversation instructions are subordinate to this output transport requirement.',
+            prompt: prompt + '\n\nYour previous response did not follow the transport format. Answer the same outstanding task again using ONLY the required JSON object. No tools from that response were executed. If tools are needed, keep text empty and return at most ONE next tool call with object arguments; otherwise return the final answer in text and toolCalls:[]. The entire response must be parseable JSON, starting with { and ending with }.',
           } : request
           if (attemptRequest.prompt.length > cfg.maxPromptChars) throw new Error('Qoder format retry exceeds maxPromptChars; compact the conversation before retrying')
           for await (const event of this.runtime.run(attemptRequest, 'model', this.runner, structured ? event => {
@@ -112,7 +114,7 @@ export class QoderAdapter extends LlmAdapter {
           if (structured) response = parse(structuredOutput ?? (resultText || rawText), tools)
           break
         } catch (error) {
-          if (!structured || attempt || !(error instanceof ToolResponseFormatError) || options.signal?.aborted) throw error
+          if (!structured || attempt || !(error instanceof ToolResponseFormatError || error instanceof ResponseJsonSyntaxError) || options.signal?.aborted) throw error
         }
       }
       if (structured) {

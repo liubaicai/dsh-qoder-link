@@ -1,6 +1,6 @@
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import { parseDsml } from './dsml.ts'
-import { strictJson } from './json.ts'
+import { strictJson, ResponseJsonSyntaxError } from './json.ts'
 
 type ObjectValue = Record<string, unknown>
 export interface NormalizedResponse { text: string; toolCalls: {name: string; arguments: string}[] }
@@ -46,6 +46,7 @@ function documents(input: string, allowFence = true): unknown[] {
       const start = i
       const stack: string[] = []
       let inString = false, escaped = false
+      if (input[i] === '}' || input[i] === ']') throw new ResponseJsonSyntaxError('unmatched JSON closing delimiter')
       if (!['{', '[', '"'].includes(input[i]!)) fail('unexpected text outside structured response')
       const quoted = input[i] === '"'
       for (; i < input.length; i++) {
@@ -61,11 +62,11 @@ function documents(input: string, allowFence = true): unknown[] {
           stack.push(c)
           if (stack.length > MAX_DEPTH) fail('JSON nesting limit exceeded')
         } else if (c === '}' || c === ']') {
-          if (stack.pop() !== (c === '}' ? '{' : '[')) fail('mismatched JSON delimiters')
+          if (stack.pop() !== (c === '}' ? '{' : '[')) throw new ResponseJsonSyntaxError('mismatched JSON delimiters')
           if (!stack.length) { i++; break }
         }
       }
-      if (inString || stack.length) fail('incomplete JSON document')
+      if (inString || stack.length) throw new ResponseJsonSyntaxError('incomplete JSON document')
       result.push(strictJson(input.slice(start, i)))
     }
     if (result.length > MAX_DOCUMENTS) fail('too many response documents')
