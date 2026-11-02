@@ -265,6 +265,18 @@ export function parseResponse(value: unknown, tools: readonly ToolSchema[]): Nor
   if (input.startsWith('<｜｜DSML｜｜')) {
     normalizer.visit(parseDsml(input)); return normalizer.result()
   }
+  // Qwen can prepend its native marker to the complete DSH envelope and omit
+  // the closing tag at end_turn. Accept only one canonical, complete JSON object;
+  // never repair JSON, recover bare calls, or ignore trailing/partial content.
+  if (input.startsWith('<tool_call>') && !input.endsWith('</tool_call>')) {
+    const docs = documents(input.slice('<tool_call>'.length), false)
+    const envelope = docs[0]
+    if (docs.length !== 1 || !object(envelope) || Object.keys(envelope).length !== 2
+      || !own(envelope, 'text') || typeof envelope.text !== 'string'
+      || !own(envelope, 'toolCalls') || !Array.isArray(envelope.toolCalls)) fail('incomplete tool_call wrapper')
+    normalizer.visit(envelope)
+    return normalizer.result()
+  }
   // Hermes/Qwen complete JSON tool-call tags. No prose or arbitrary XML parsing.
   if (/^<tool_call>/.test(input)) {
     let count = 0

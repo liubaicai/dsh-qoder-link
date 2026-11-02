@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { parseResponse } from '../src/prompt.ts'
 import { QoderAdapter, type Runner } from '../src/adapter.ts'
 import { resolveConfig } from '../src/config.ts'
@@ -154,7 +155,7 @@ test('call/document/depth limits cover provider and string routes', () => {
   assert.throws(()=>parseResponse('['.repeat(40)+'{}'+']'.repeat(40),tools))
 })
 
-async function replay(value: unknown, mode: 'structured'|'result'|'stream'): Promise<StreamChunk[]> {
+async function replay(value: unknown, mode: 'structured'|'result'|'stream', available = tools): Promise<StreamChunk[]> {
   const runner: Runner=async function* (request) {
     assert.equal(request.tools,'');assert.equal(('jsonSchema' in request ? true : undefined),undefined)
     yield {type:'usage',input:100,output:12,cacheRead:20,cacheWrite:0}
@@ -166,7 +167,7 @@ async function replay(value: unknown, mode: 'structured'|'result'|'stream'): Pro
     }
   }
   const chunks:StreamChunk[]=[]
-  for await(const c of new QoderAdapter(resolveConfig({},{}),runner).stream({provider:'qoder',model:'default',messages:[],tools})) chunks.push(c)
+  for await(const c of new QoderAdapter(resolveConfig({},{}),runner).stream({provider:'qoder',model:'default',messages:[],tools:available})) chunks.push(c)
   return chunks
 }
 test('every provider format works through structuredOutput, result and fragmented stream', async()=>{
@@ -177,6 +178,34 @@ test('every provider format works through structuredOutput, result and fragmente
     const last=out.at(-1);assert.equal(last?.type==='finish'&&last.reason.kind,'tool-calls')
   }
 })
+test('captured Qwen opening marker accepts only a complete canonical envelope', async () => {
+  const raw = readFileSync(new URL('./fixtures/qwen-open-envelope.txt', import.meta.url), 'utf8')
+  const available = [...tools, {name:'read',description:'read file',parameters:{}}]
+  const expected = parseResponse(raw.slice('<tool_call>'.length), available)
+  assert.deepEqual(parseResponse(raw, available), expected)
+  assert.deepEqual(expected.toolCalls.map(call => call.name), ['pwsh','read'])
+  const wire = '<tool_call>\n' + JSON.stringify({text:'checking',toolCalls:[call(args)]})
+  for (const mode of ['result','stream'] as const) {
+    const out = await replay(raw, mode, available)
+    assert.deepEqual(out.filter(c=>c.type==='tool-call-delta').map(c=>({name:c.name,arguments:c.argumentsDelta})), expected.toolCalls)
+    const finish=out.at(-1)
+    assert.equal(finish?.type==='finish' && finish.reason.kind, 'tool-calls')
+  }
+  const bad = [raw.trim().slice(0,-1), raw+' trailing', raw+'{}', '<tool_call>'+JSON.stringify(call(args)),
+    '<tool_call>'+JSON.stringify({text:'',toolCalls:[{name:'missing',arguments:'{}'}]}),
+    '<tool_call>'+JSON.stringify({text:'',toolCalls:[call('{')]}),
+    wire+'<tool_call>', wire+'</tool_call><tool_call>', '<tool_call>{"text":"a","text":"b","toolCalls":[]}']
+  for (const value of bad) {
+    assert.throws(()=>parseResponse(value, available))
+    for (const mode of ['result','stream'] as const) {
+      const out=await replay(value,mode,available)
+      assert.equal(out.filter(c=>c.type==='text-delta'||c.type==='tool-call-delta').length,0)
+      const finish=out.at(-1)
+      assert.equal(finish?.type==='finish' && finish.reason.kind,'error')
+    }
+  }
+})
+
 test('invalid trailing blocks emit no earlier text or tools and retain usage', async()=>{
   for(const value of invalid) {
     // Use arrays to place a valid call before every invalid structured member.

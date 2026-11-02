@@ -1,0 +1,2 @@
+<tool_call>
+{"text":"我来确认仓库信息和 package.json 中的 dsh.bundle 声明，然后准备收录申请文件。","toolCalls":[{"name":"pwsh","arguments":"{\"description\":\"Check git remote URL\",\"command\":\"git -C 'C:/example/plugin' remote get-url origin\"}"},{"name":"read","arguments":"{\"file_path\":\"C:/example/plugin/package.json\"}"}]}

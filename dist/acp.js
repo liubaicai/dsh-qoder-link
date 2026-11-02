@@ -397,7 +397,7 @@ export async function* runQoderAcp(request) {
         onAbort();
     const driver = (async () => {
         try {
-            const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.5' } });
+            const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'dsh-qoder-link', version: '0.1.6' } });
             if (!object(init) || init.protocolVersion !== 1 || !object(init.agentCapabilities))
                 throw protocolError();
             if (failure)
