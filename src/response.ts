@@ -6,7 +6,7 @@ type ObjectValue = Record<string, unknown>
 export interface NormalizedResponse { text: string; toolCalls: {name: string; arguments: string}[] }
 /** Recognizable tool syntax must never silently succeed as plain answer text. */
 export class ToolResponseFormatError extends Error {
-  constructor() { super('Qoder returned tool syntax mixed with prose; a strict response is required'); this.name = 'ToolResponseFormatError' }
+  constructor(detail?: string) { super(detail ? `Invalid Qoder response envelope: ${detail}` : 'Qoder returned tool syntax mixed with prose; a strict response is required'); this.name = 'ToolResponseFormatError' }
 }
 const MAX_DEPTH = 32
 const MAX_DOCUMENTS = 64
@@ -18,6 +18,9 @@ export class ToolCallLimitError extends Error {
 const own = (o: ObjectValue, key: string) => Object.hasOwn(o, key)
 const object = (v: unknown): v is ObjectValue => !!v && typeof v === 'object' && !Array.isArray(v)
 const fail = (detail: string): never => { throw new Error(`Invalid Qoder response envelope: ${detail}`) }
+// Missing payloads and broken transport wrappers may be regenerated, never repaired.
+// Semantic refusals and document/depth limits continue to use fail().
+const formatFail = (detail: string): never => { throw new ToolResponseFormatError(detail) }
 function keys(o: ObjectValue, allowed: string[]): void {
   if (Object.keys(o).some(k => !allowed.includes(k))) fail('unknown or conflicting fields')
 }
@@ -37,10 +40,10 @@ function documents(input: string, allowFence = true): unknown[] {
     if (input.startsWith('```', i)) {
       if (!allowFence) fail('nested JSON fences')
       const opening = /^```(?:json|jsonc|jsonl|ndjson)?[ \t]*\r?\n/i.exec(input.slice(i))
-      if (!opening) fail('unsupported or incomplete JSON fence')
+      if (!opening) formatFail('unsupported or incomplete JSON fence')
       const start = i + opening![0].length
       const ending = /^[ \t]*```[ \t]*(?=\r?$)/m.exec(input.slice(start))
-      if (!ending) fail('unclosed JSON fence')
+      if (!ending) formatFail('unclosed JSON fence')
       const inner = input.slice(start, start + ending!.index)
       // Opening fences inside JSON strings are opaque. At document boundaries
       // nested fences are disallowed by the explicit transport-depth guard.
@@ -51,7 +54,7 @@ function documents(input: string, allowFence = true): unknown[] {
       const stack: string[] = []
       let inString = false, escaped = false
       if (input[i] === '}' || input[i] === ']') throw new ResponseJsonSyntaxError('unmatched JSON closing delimiter')
-      if (!['{', '[', '"'].includes(input[i]!)) fail('unexpected text outside structured response')
+      if (!['{', '[', '"'].includes(input[i]!)) formatFail('unexpected text outside structured response')
       const quoted = input[i] === '"'
       for (; i < input.length; i++) {
         const c = input[i]!
@@ -75,7 +78,7 @@ function documents(input: string, allowFence = true): unknown[] {
     }
     if (result.length > MAX_DOCUMENTS) fail('too many response documents')
   }
-  if (!result.length) fail('empty structured response')
+  if (!result.length) formatFail('empty structured response')
   return result
 }
 
@@ -270,7 +273,7 @@ export function parseResponse(value: unknown, tools: readonly ToolSchema[]): Nor
   if (typeof value !== 'string') { normalizer.visit(value); return normalizer.result() }
   const raw = value
   let input = raw.trim()
-  if (!input) fail('empty response')
+  if (!input) formatFail('empty response')
   if (input.startsWith('<｜｜DSML｜｜')) {
     normalizer.visit(parseDsml(input)); return normalizer.result()
   }
@@ -282,7 +285,7 @@ export function parseResponse(value: unknown, tools: readonly ToolSchema[]): Nor
     const envelope = docs[0]
     if (docs.length !== 1 || !object(envelope) || Object.keys(envelope).length !== 2
       || !own(envelope, 'text') || typeof envelope.text !== 'string'
-      || !own(envelope, 'toolCalls') || !Array.isArray(envelope.toolCalls)) fail('incomplete tool_call wrapper')
+      || !own(envelope, 'toolCalls') || !Array.isArray(envelope.toolCalls)) formatFail('incomplete tool_call wrapper')
     normalizer.visit(envelope)
     return normalizer.result()
   }
@@ -290,7 +293,7 @@ export function parseResponse(value: unknown, tools: readonly ToolSchema[]): Nor
   if (/^<tool_call>/.test(input)) {
     let count = 0
     while (input) {
-      if (!input.startsWith('<tool_call>')) fail('unexpected data outside tool_call tags')
+      if (!input.startsWith('<tool_call>')) formatFail('unexpected data outside tool_call tags')
       let end = -1, quoted = false, escaped = false
       for (let i = '<tool_call>'.length; i < input.length; i++) {
         const c = input[i]
@@ -301,7 +304,8 @@ export function parseResponse(value: unknown, tools: readonly ToolSchema[]): Nor
         } else if (c === '"') quoted = true
         else if (input.startsWith('</tool_call>',i)) { end = i; break }
       }
-      if (end < 0 || ++count > MAX_DOCUMENTS) fail('incomplete or excessive tool_call tags')
+      if (end < 0) formatFail('incomplete tool_call tags')
+      if (++count > MAX_DOCUMENTS) fail('excessive tool_call tags')
       const body = input.slice('<tool_call>'.length,end)
       normalizer.visit(strictJson(body))
       input = input.slice(end + '</tool_call>'.length).trim()
@@ -319,7 +323,8 @@ export function parseResponse(value: unknown, tools: readonly ToolSchema[]): Nor
     for (const doc of docs) normalizer.visit(doc)
     return normalizer.result()
   }
-  if (/^<\/?(?:tool_call|function_call|function_calls|invoke)\b|^<\|(?:tool|function)/i.test(input)) fail('unsupported tool serialization')
+  if (/^<\/?tool_call\b/i.test(input)) formatFail('incomplete or unsupported tool_call wrapper')
+  if (/^<\/?(?:function_call|function_calls|invoke)\b|^<\|(?:tool|function)/i.test(input)) fail('unsupported tool serialization')
   // A real DSML document mixed into prose remains ambiguous; never execute it.
   if (input.includes('<｜｜DSML｜｜')) fail('DSML must be a standalone document')
   if (/^[ \t]*<\/?tool_call\b/m.test(input)) throw new ToolResponseFormatError()

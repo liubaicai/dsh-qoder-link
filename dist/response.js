@@ -2,7 +2,7 @@ import { parseDsml } from "./dsml.js";
 import { strictJson, ResponseJsonSyntaxError } from "./json.js";
 /** Recognizable tool syntax must never silently succeed as plain answer text. */
 export class ToolResponseFormatError extends Error {
-    constructor() { super('Qoder returned tool syntax mixed with prose; a strict response is required'); this.name = 'ToolResponseFormatError'; }
+    constructor(detail) { super(detail ? `Invalid Qoder response envelope: ${detail}` : 'Qoder returned tool syntax mixed with prose; a strict response is required'); this.name = 'ToolResponseFormatError'; }
 }
 const MAX_DEPTH = 32;
 const MAX_DOCUMENTS = 64;
@@ -14,6 +14,9 @@ export class ToolCallLimitError extends Error {
 const own = (o, key) => Object.hasOwn(o, key);
 const object = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const fail = (detail) => { throw new Error(`Invalid Qoder response envelope: ${detail}`); };
+// Missing payloads and broken transport wrappers may be regenerated, never repaired.
+// Semantic refusals and document/depth limits continue to use fail().
+const formatFail = (detail) => { throw new ToolResponseFormatError(detail); };
 function keys(o, allowed) {
     if (Object.keys(o).some(k => !allowed.includes(k)))
         fail('unknown or conflicting fields');
@@ -39,11 +42,11 @@ function documents(input, allowFence = true) {
                 fail('nested JSON fences');
             const opening = /^```(?:json|jsonc|jsonl|ndjson)?[ \t]*\r?\n/i.exec(input.slice(i));
             if (!opening)
-                fail('unsupported or incomplete JSON fence');
+                formatFail('unsupported or incomplete JSON fence');
             const start = i + opening[0].length;
             const ending = /^[ \t]*```[ \t]*(?=\r?$)/m.exec(input.slice(start));
             if (!ending)
-                fail('unclosed JSON fence');
+                formatFail('unclosed JSON fence');
             const inner = input.slice(start, start + ending.index);
             // Opening fences inside JSON strings are opaque. At document boundaries
             // nested fences are disallowed by the explicit transport-depth guard.
@@ -57,7 +60,7 @@ function documents(input, allowFence = true) {
             if (input[i] === '}' || input[i] === ']')
                 throw new ResponseJsonSyntaxError('unmatched JSON closing delimiter');
             if (!['{', '[', '"'].includes(input[i]))
-                fail('unexpected text outside structured response');
+                formatFail('unexpected text outside structured response');
             const quoted = input[i] === '"';
             for (; i < input.length; i++) {
                 const c = input[i];
@@ -99,7 +102,7 @@ function documents(input, allowFence = true) {
             fail('too many response documents');
     }
     if (!result.length)
-        fail('empty structured response');
+        formatFail('empty structured response');
     return result;
 }
 class Normalizer {
@@ -403,7 +406,7 @@ export function parseResponse(value, tools) {
     const raw = value;
     let input = raw.trim();
     if (!input)
-        fail('empty response');
+        formatFail('empty response');
     if (input.startsWith('<｜｜DSML｜｜')) {
         normalizer.visit(parseDsml(input));
         return normalizer.result();
@@ -417,7 +420,7 @@ export function parseResponse(value, tools) {
         if (docs.length !== 1 || !object(envelope) || Object.keys(envelope).length !== 2
             || !own(envelope, 'text') || typeof envelope.text !== 'string'
             || !own(envelope, 'toolCalls') || !Array.isArray(envelope.toolCalls))
-            fail('incomplete tool_call wrapper');
+            formatFail('incomplete tool_call wrapper');
         normalizer.visit(envelope);
         return normalizer.result();
     }
@@ -426,7 +429,7 @@ export function parseResponse(value, tools) {
         let count = 0;
         while (input) {
             if (!input.startsWith('<tool_call>'))
-                fail('unexpected data outside tool_call tags');
+                formatFail('unexpected data outside tool_call tags');
             let end = -1, quoted = false, escaped = false;
             for (let i = '<tool_call>'.length; i < input.length; i++) {
                 const c = input[i];
@@ -445,8 +448,10 @@ export function parseResponse(value, tools) {
                     break;
                 }
             }
-            if (end < 0 || ++count > MAX_DOCUMENTS)
-                fail('incomplete or excessive tool_call tags');
+            if (end < 0)
+                formatFail('incomplete tool_call tags');
+            if (++count > MAX_DOCUMENTS)
+                fail('excessive tool_call tags');
             const body = input.slice('<tool_call>'.length, end);
             normalizer.visit(strictJson(body));
             input = input.slice(end + '</tool_call>'.length).trim();
@@ -466,7 +471,9 @@ export function parseResponse(value, tools) {
             normalizer.visit(doc);
         return normalizer.result();
     }
-    if (/^<\/?(?:tool_call|function_call|function_calls|invoke)\b|^<\|(?:tool|function)/i.test(input))
+    if (/^<\/?tool_call\b/i.test(input))
+        formatFail('incomplete or unsupported tool_call wrapper');
+    if (/^<\/?(?:function_call|function_calls|invoke)\b|^<\|(?:tool|function)/i.test(input))
         fail('unsupported tool serialization');
     // A real DSML document mixed into prose remains ambiguous; never execute it.
     if (input.includes('<｜｜DSML｜｜'))

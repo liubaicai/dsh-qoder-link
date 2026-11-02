@@ -60,13 +60,21 @@ test('tool markup hidden in a canonical text field also triggers one repair', as
   assert.equal(out.some(c=>c.type==='text-delta'&&c.text.includes('<tool_call>')),false)
 })
 
-test('JSON syntax failures regenerate once without repairing or emitting the failed response', async () => {
-  const bad = [canonical.replace('}}]}','}}}]}'), canonical+'}', canonical+']', canonical.slice(0,-1), '{"text":"checking","toolCalls":[}',
+test('empty, incomplete transport and JSON syntax failures regenerate once without partial output', async () => {
+  const bad = ['', ' \n', '<tool_call>\n', '<tool_call>\n</tool_call>', '<tool_call',
+    '<tool_call>'+JSON.stringify(call), '```json\n'+canonical, '```json\n\n```',
+    canonical.replace('}}]}','}}}]}'), canonical+'}', canonical+']', canonical.slice(0,-1), '{"text":"checking","toolCalls":[}',
     JSON.stringify({text:'',toolCalls:[{name:'read',arguments:'{"file_path":'}]})]
   for(const malformed of bad) {
     let calls=0
-    const out=await collect(async function*(){calls++;yield {type:'result',text:calls===1?malformed:canonical}})
+    const out=await collect(async function*(){
+      calls++
+      const text=calls===1?malformed:canonical
+      for(let i=0;i<text.length;i+=7) yield {type:'text',delta:text.slice(i,i+7)}
+      yield {type:'result',text}
+    })
     assert.equal(calls,2)
+    assert.deepEqual(out.filter(c=>c.type==='text-delta').map(c=>c.text),['checking'])
     assert.equal(out.filter(c=>c.type==='tool-call-delta').length,1)
     const finish=out.at(-1)
     assert.equal(finish?.type==='finish'&&finish.reason.kind,'tool-calls')
@@ -77,12 +85,14 @@ test('JSON syntax failures regenerate once without repairing or emitting the fai
     assert.equal(calls,1)
     assert.equal(out.filter(c=>c.type==='tool-call-delta').length,0)
   }
-  let calls=0
-  const out=await collect(async function*(){calls++;yield {type:'result',text:bad[0]!}})
-  assert.equal(calls,2)
-  assert.equal(out.filter(c=>c.type==='tool-call-delta'||c.type==='text-delta').length,0)
-  const finish=out.at(-1)
-  assert.equal(finish?.type==='finish'&&finish.reason.kind,'error')
+  for (const text of ['', '<tool_call>\n']) {
+    let calls=0
+    const out=await collect(async function*(){calls++;yield {type:'result',text}})
+    assert.equal(calls,2)
+    assert.equal(out.filter(c=>c.type==='tool-call-delta'||c.type==='text-delta').length,0)
+    const finish=out.at(-1)
+    assert.equal(finish?.type==='finish'&&finish.reason.kind,'error')
+  }
 })
 
 test('tool batch limit is shared by prompt/schema and regenerates overflow without partial calls', async () => {

@@ -8,7 +8,7 @@ export interface NormalizedResponse {
 }
 /** Recognizable tool syntax must never silently succeed as plain answer text. */
 export declare class ToolResponseFormatError extends Error {
-    constructor();
+    constructor(detail?: string);
 }
 export declare const MAX_TOOL_CALLS = 32;
 /** Oversized responses may be regenerated, but never truncated or partly emitted. */
